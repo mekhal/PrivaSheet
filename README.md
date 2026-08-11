@@ -1,13 +1,48 @@
-## About The Project
+# PrivaSheet
 
-This project is a private, open-source (MIT License) PDF to Excel converter built to run entirely on your local machine. It solves a critical pain point in modern data processing: the privacy risk of uploading sensitive financial records, invoices, or proprietary documents to cloud-based extraction tools.
+**Privacy-first PDF-to-CSV extraction powered by local LLMs.**
 
-Unlike traditional rapid-prototype AI projects, this system was built and managed using a strict AI-DLC (AI-Driven Development Life Cycle) framework. It serves as a production-grade blueprint demonstrating how AI code generation can be tightly structured, verified, and architected to deliver secure and deterministic software.
+PrivaSheet converts PDF documents into structured CSV files using a local LLM through [Ollama](https://ollama.com/).
 
-### Core Features
+Your documents stay on your machine.
 
-* 100% Local Privacy: Operates entirely offline. Your documents never leave your machine, ensuring complete data security.
-* Local LLM Integration: Uses open-weight models like Qwen or Llama via Ollama to handle complex table layouts that traditional rule-based parsers fail to extract.
-* Structured Output: Employs a robust parsing pipeline to force deterministic JSON responses from the local model before transforming them into clean Excel sheets.
-* Free and Unlimited: No paywalls, no usage tiers, and no restrictions on file size or page counts.
-* AI-DLC Engineered: Fully documented with Architecture Decision Records (ADR) and integrated quality gates to prove the stability and maintainability of the codebase.
+```text
+PDF → Extract → Local LLM → JSON → Validate → CSV
+```
+
+## Why?
+
+Sensitive documents often contain financial, customer, or business data that should not be uploaded to a cloud service.
+
+PrivaSheet takes a **local-first** approach:
+
+* **100% local processing**
+* **No cloud AI required**
+* **Free and open source**
+* **MIT License**
+
+## AI-DLC
+
+PrivaSheet is built using an **AI-Driven Development Life Cycle (AI-DLC)**.
+
+The goal is not simply to generate code with AI, but to use AI-assisted development with explicit engineering practices for:
+
+* Architecture
+* Quality
+* Testing
+* Security
+* Traceability
+
+Architecture decisions and development practices are documented in the repository.
+
+## Status
+
+**Early development**
+
+The project is currently focused on building and validating the core extraction pipeline.
+
+Production-readiness claims will be backed by tests and measurable benchmarks as the project matures.
+
+## License
+
+MIT
