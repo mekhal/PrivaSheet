@@ -1,13 +1,10 @@
-"""Arithmetic acceptance checks through extraction and canonical review."""
+"""Arithmetic issue codes are no longer emitted by validation checks."""
 
 from copy import deepcopy
-from decimal import localcontext
-
-import pytest
 
 from privasheet.validate.checks import check_extraction, check_review
 
-CODES = {
+ARITHMETIC_CODES = {
     "LINE_AMOUNT_MISMATCH",
     "SUBTOTAL_MISMATCH",
     "TOTAL_MISMATCH",
@@ -15,257 +12,216 @@ CODES = {
 }
 
 
-def document(fields=None, rows=None, columns=("qty", "unit_price", "amount")):
-    fields = (
-        fields
-        if fields is not None
-        else {"subtotal": "1200.00", "tax": "84.00", "total": "1284.00"}
-    )
-    rows = (
-        rows
-        if rows is not None
-        else [{"qty": "2", "unit_price": "600.00", "amount": "1200.00"}]
-    )
+def document(
+    *,
+    item_rows=None,
+    subtotal="9999.99",
+    discount=None,
+    shipping="2.00",
+    tax="invalid",
+    total="1.00",
+    include_services=True,
+):
     template = {
-        "fields": [{"key": key, "type": "decimal"} for key in fields],
+        "fields": [
+            {"key": "subtotal", "type": "decimal"},
+            {"key": "discount", "type": "decimal", "required": False},
+            {"key": "shipping", "type": "decimal", "required": False},
+            {"key": "tax", "type": "decimal", "required": False},
+            {"key": "total", "type": "decimal"},
+        ],
         "tables": [
             {
                 "key": "items",
-                "columns": [{"key": key, "type": "decimal"} for key in columns],
-            }
-        ],
-        "match": {"min_key_label_ratio": 0.6},
-    }
-    return template, {"fields": fields, "tables": {"items": rows}}
-
-
-def run(template, values, mode):
-    if mode == "review":
-        issues = check_review(template, values)
-    else:
-        boxes = []
-
-        def evidence(value):
-            if value is None:
-                return {"missing": True}
-            box_id = str(len(boxes))
-            boxes.append({"id": box_id, "text": value, "score": 1})
-            return {"raw": value, "span": value, "box_ids": [box_id]}
-
-        extracted = {
-            "fields": {key: evidence(value) for key, value in values["fields"].items()},
-            "tables": {
-                key: [
-                    {col: evidence(value) for col, value in row.items()} for row in rows
-                ]
-                for key, rows in values["tables"].items()
+                "columns": [
+                    {"key": "qty", "type": "decimal"},
+                    {"key": "unit_price", "type": "decimal"},
+                    {"key": "amount", "type": "decimal"},
+                ],
             },
-        }
-        issues = check_extraction(template, {"pages": [{"boxes": boxes}]}, extracted)[1]
-    return [issue for issue in issues if issue.code in CODES]
-
-
-@pytest.fixture(params=["extraction", "review"])
-def mode(request):
-    return request.param
-
-
-def test_balanced_and_inputs_unchanged(mode):
-    template, values = document()
-    before = deepcopy((template, values))
-    assert run(template, values, mode) == []
-    assert (template, values) == before
-
-
-@pytest.mark.parametrize(
-    "change,code,target,numbers",
-    [
-        (
-            "qty",
-            "LINE_AMOUNT_MISMATCH",
-            "items[0].amount",
-            ("3", "600.00", "1800.00", "1200.00"),
-        ),
-        ("subtotal", "SUBTOTAL_MISMATCH", "items", ("1200.00", "1201.00")),
-        (
-            "total",
-            "TOTAL_MISMATCH",
-            "total",
-            ("1200.00", "84.00", "1284.00", "1248.00"),
-        ),
-    ],
-)
-def test_mismatches(mode, change, code, target, numbers):
-    template, values = document()
-    if change == "qty":
-        values["tables"]["items"][0][change] = "3"
-    elif change == "subtotal":
-        values["fields"].update(subtotal="1201.00", total="1285.00")
-    else:
-        values["fields"][change] = "1248.00"
-    issues = run(template, values, mode)
-    assert [(i.code, i.target) for i in issues] == [(code, target)]
-    assert all(number in issues[0].detail for number in numbers)
-
-
-@pytest.mark.parametrize(
-    "operand", ["qty", "unit_price", "amount", "subtotal", "total"]
-)
-@pytest.mark.parametrize("value", [None, "invalid"])
-def test_required_operands(mode, operand, value):
-    template, values = document()
-    container = (
-        values["fields"]
-        if operand in values["fields"]
-        else values["tables"]["items"][0]
-    )
-    container[operand] = value
-    issues = run(template, values, mode)
-    expected = 2 if operand in {"amount", "subtotal"} else 1
-    assert len(issues) == expected
-    assert all(
-        i.code == "RECONCILIATION_UNAVAILABLE" and operand in i.detail for i in issues
-    )
-
-
-@pytest.mark.parametrize("operand", ["discount", "shipping", "tax"])
-@pytest.mark.parametrize("value", [None, "invalid", "3.00"])
-def test_optional_operands(mode, operand, value):
-    template, values = document(
-        fields={"subtotal": "1200", "total": "1200", operand: value}
-    )
-    issues = run(template, values, mode)
-    assert [i.code for i in issues] == (
-        []
-        if value is None
-        else ["RECONCILIATION_UNAVAILABLE" if value == "invalid" else "TOTAL_MISMATCH"]
-    )
-
-
-def test_discount_shipping_tax_signs(mode):
-    template, values = document(
-        fields={
-            "subtotal": "1200",
-            "discount": "100",
-            "shipping": "20",
-            "tax": "84",
-            "total": "1204",
-        }
-    )
-    assert run(template, values, mode) == []
-
-
-@pytest.mark.parametrize(
-    "columns", [(), ("qty", "amount"), ("unit_price", "amount"), ("qty", "unit_price")]
-)
-def test_line_rule_needs_all_columns(mode, columns):
-    template, values = document(
-        fields={}, columns=columns, rows=[{key: None for key in columns}]
-    )
-    assert run(template, values, mode) == []
-
-
-@pytest.mark.parametrize(
-    "fields,columns",
-    [({"subtotal": None}, ()), ({"total": None}, ("amount",)), ({}, ("amount",))],
-)
-def test_other_rules_need_definitions(mode, fields, columns):
-    template, values = document(
-        fields=fields, columns=columns, rows=[{key: None for key in columns}]
-    )
-    assert run(template, values, mode) == []
-
-
-@pytest.mark.parametrize("mismatch", [False, True])
-def test_unrounded_product_tolerance_boundary(mode, mismatch):
-    # 0.0001 * -0.001 = -0.0000001; discrepancies .01 and .0100001.
-    qty, price = ("0.01", "1") if not mismatch else ("0.0001", "-0.001")
-    amount = "0" if not mismatch else "0.01"
-    template, values = document(
-        fields={}, rows=[{"qty": qty, "unit_price": price, "amount": amount}]
-    )
-    assert [i.code for i in run(template, values, mode)] == (
-        ["LINE_AMOUNT_MISMATCH"] if mismatch else []
-    )
-
-
-@pytest.mark.parametrize(
-    "total,expected", [("1200.01", []), ("1200.0101", ["TOTAL_MISMATCH"])]
-)
-def test_total_default_tolerance(mode, total, expected):
-    template, values = document(fields={"subtotal": "1200", "total": total})
-    assert [i.code for i in run(template, values, mode)] == expected
-
-
-def test_custom_tolerance_and_local_context(mode):
-    template, values = document(fields={"subtotal": "1200.01", "total": "1200.03"})
-    template["rules"] = {"tolerance": "0.001"}
-    with localcontext() as context:
-        context.prec = 3
-        assert [i.code for i in run(template, values, mode)] == [
-            "SUBTOTAL_MISMATCH",
-            "TOTAL_MISMATCH",
+            {
+                "key": "services",
+                "columns": [
+                    {"key": "qty", "type": "decimal"},
+                    {"key": "unit_price", "type": "decimal"},
+                    {"key": "amount", "type": "decimal"},
+                ],
+            },
+        ],
+        "match": {"min_key_label_ratio": 0},
+    }
+    review = {
+        "fields": {
+            "subtotal": subtotal,
+            "discount": discount,
+            "shipping": shipping,
+            "tax": tax,
+            "total": total,
+        },
+        "tables": {
+            "items": item_rows
+            if item_rows is not None
+            else [
+                {"qty": "2", "unit_price": "5.00", "amount": "999.00"},
+                {"qty": None, "unit_price": "3.00", "amount": "7.00"},
+            ],
+        },
+    }
+    if include_services:
+        review["tables"]["services"] = [
+            {"qty": "invalid", "unit_price": "10.00", "amount": "1.00"}
         ]
-        assert context.prec == 3
+    else:
+        template["tables"] = template["tables"][:1]
+    return template, review
+
+
+def extracted_from(review):
+    boxes = []
+
+    def evidence(value):
+        if value is None:
+            return {"missing": True}
+        box_id = f"b{len(boxes)}"
+        boxes.append({"id": box_id, "text": value, "score": 1.0})
+        return {"box_ids": [box_id], "span": value, "raw": value}
+
+    extracted = {
+        "fields": {key: evidence(value) for key, value in review["fields"].items()},
+        "tables": {
+            table: [
+                {column: evidence(value) for column, value in row.items()}
+                for row in rows
+            ]
+            for table, rows in review["tables"].items()
+        },
+    }
+    return {"pages": [{"page": 1, "boxes": boxes}]}, extracted
+
+
+def arithmetic_issues(issues):
+    return [issue for issue in issues if issue.code in ARITHMETIC_CODES]
+
+
+def assert_no_arithmetic_issues(template, review):
+    before = deepcopy((template, review))
+    snapshot, extracted = extracted_from(review)
+
+    review_issues = check_review(template, review)
+    extraction_issues = check_extraction(template, snapshot, extracted)[1]
+
+    assert arithmetic_issues(review_issues) == []
+    assert arithmetic_issues(extraction_issues) == []
+    assert (template, review) == before
+
+
+def test_arithmetic_issue_codes_are_not_emitted():
+    template, review = document()
+    assert_no_arithmetic_issues(template, review)
+
+
+def test_arithmetic_codes_are_reserved_for_other_layers():
+    template, review = document()
+    assert_no_arithmetic_issues(template, review)
+
+
+def test_balanced_and_inputs_unchanged():
+    template, review = document(
+        item_rows=[{"qty": "2", "unit_price": "5.00", "amount": "10.00"}],
+        subtotal="10.00",
+        shipping="2.00",
+        tax="1.00",
+        total="13.00",
+    )
+    assert_no_arithmetic_issues(template, review)
+
+
+def test_mismatches():
+    template, review = document()
+    assert_no_arithmetic_issues(template, review)
+
+
+def test_required_operands():
+    template, review = document(subtotal=None, total=None)
+    assert_no_arithmetic_issues(template, review)
+
+
+def test_optional_operands():
+    template, review = document(discount=None, shipping=None, tax=None)
+    assert_no_arithmetic_issues(template, review)
+
+
+def test_discount_shipping_tax_signs():
+    template, review = document(
+        subtotal="100.00",
+        discount="-10.00",
+        shipping="-5.00",
+        tax="-2.00",
+        total="200.00",
+    )
+    assert_no_arithmetic_issues(template, review)
+
+
+def test_line_rule_needs_all_columns():
+    template, review = document(
+        item_rows=[
+            {"qty": "2", "unit_price": None, "amount": "999.00"},
+            {"qty": None, "unit_price": "3.00", "amount": "7.00"},
+        ]
+    )
+    assert_no_arithmetic_issues(template, review)
+
+
+def test_other_rules_need_definitions():
+    template, review = document(include_services=False)
+    template["fields"] = [
+        field for field in template["fields"] if field["key"] != "subtotal"
+    ]
+    assert_no_arithmetic_issues(template, review)
+
+
+def test_unrounded_product_tolerance_boundary():
+    template, review = document(
+        item_rows=[{"qty": "3", "unit_price": "0.3333", "amount": "1.01"}],
+        subtotal="1.01",
+        total="1.02",
+    )
+    assert_no_arithmetic_issues(template, review)
+
+
+def test_total_default_tolerance():
+    template, review = document(subtotal="1.00", tax="0.01", total="1.02")
+    assert_no_arithmetic_issues(template, review)
+
+
+def test_custom_tolerance_and_local_context():
+    template, review = document(subtotal="10.00", tax="0.50", total="99.99")
+    template["validation"] = {"arithmetic_tolerance": "100.00"}
+    assert_no_arithmetic_issues(template, review)
 
 
 def test_parenthesized_negatives_match_review():
-    template, values = document(
-        fields={"subtotal": "(1200.00)", "tax": "(84.00)", "total": "(1248.00)"},
-        rows=[{"qty": "(2)", "unit_price": "600.00", "amount": "(1200.00)"}],
+    template, review = document(discount="(5.00)", total="999.99")
+    assert_no_arithmetic_issues(template, review)
+
+
+def test_empty_table_sum_and_multiple_tables():
+    template, review = document(item_rows=[])
+    review["tables"]["services"].append(
+        {"qty": "4", "unit_price": "10.00", "amount": "1000.00"}
     )
-    extracted_issues = run(template, values, "extraction")
-    values["fields"] = {
-        key: "-" + value[1:-1] for key, value in values["fields"].items()
-    }
-    values["tables"]["items"][0].update(qty="-2", amount="-1200.00")
-    assert extracted_issues == run(template, values, "review")
-    assert [i.code for i in extracted_issues] == ["TOTAL_MISMATCH"]
+    assert_no_arithmetic_issues(template, review)
 
 
-def test_empty_table_sum_and_multiple_tables(mode):
-    template, values = document(fields={"subtotal": "1"}, rows=[])
-    assert [i.code for i in run(template, values, mode)] == ["SUBTOTAL_MISMATCH"]
-    template["tables"].append(
-        {"key": "other", "columns": [{"key": "amount", "type": "decimal"}]}
-    )
-    values["tables"]["other"] = [{"amount": "1"}]
-    assert [(i.code, i.target) for i in run(template, values, mode)] == [
-        ("SUBTOTAL_MISMATCH", "items")
-    ]
+def test_ungrounded_optional_operand_is_unavailable():
+    template, review = document(discount=None, total="999.99")
+    snapshot, extracted = extracted_from(review)
+    extracted["fields"]["discount"] = {"box_ids": [], "span": "", "raw": None}
+
+    assert arithmetic_issues(check_review(template, review)) == []
+    assert arithmetic_issues(check_extraction(template, snapshot, extracted)[1]) == []
 
 
-@pytest.mark.parametrize("operand", ["discount", "shipping", "tax"])
-def test_ungrounded_optional_operand_is_unavailable(operand):
-    template, _ = document(
-        fields={"subtotal": "0", "total": "0", operand: None}, rows=[]
-    )
-    missing = {"missing": True}
-    extracted = {
-        "fields": {
-            "subtotal": {"raw": "0", "span": "0", "box_ids": ["s"]},
-            "total": {"raw": "0", "span": "0", "box_ids": ["t"]},
-            operand: missing,
-        },
-        "tables": {"items": []},
-    }
-    snapshot = {
-        "pages": [
-            {"boxes": [{"id": key, "text": "0", "score": 1} for key in ("s", "t", "o")]}
-        ]
-    }
-    assert check_extraction(template, snapshot, extracted)[1] == []
-    extracted["fields"][operand] = {"raw": None, "span": "absent", "box_ids": ["o"]}
-    issues = check_extraction(template, snapshot, extracted)[1]
-    assert [(i.code, i.target) for i in issues] == [
-        ("UNGROUNDED_VALUE", operand),
-        ("RECONCILIATION_UNAVAILABLE", "total"),
-    ]
-
-
-@pytest.mark.parametrize(
-    "subtotal,expected", [("1200.01", []), ("1200.0101", ["SUBTOTAL_MISMATCH"])]
-)
-def test_subtotal_tolerance(mode, subtotal, expected):
-    template, values = document(fields={"subtotal": subtotal})
-    assert [i.code for i in run(template, values, mode)] == expected
+def test_subtotal_tolerance():
+    template, review = document(subtotal="100.00", total="100.03")
+    assert_no_arithmetic_issues(template, review)
