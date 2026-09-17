@@ -71,3 +71,186 @@ tests still pass unchanged.
 
 Keep the change under 350 changed text lines (PNGs do not count). Commit nothing; the orchestrator commits.
 """
+
+# ---------------------------------------------------------------------------
+# Work set A — application foundation (spike-independent). Agreed with maintainer 2026-09-17.
+# Spec: docs/superpowers/specs/2026-09-16-template-extraction-design.md (read the sections named in each task).
+# Common rules: Python 3.12, package src/privasheet, tests in tests/, run with /home/agent/work/.venv/bin/python -m pytest.
+# Installed: pillow, pypdfium2, pytest, ruff. No network, no new dependencies. Pure standard library unless stated.
+# ---------------------------------------------------------------------------
+
+[[task]]
+id = "APP-01"
+title = "templates: template model validation"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/templates.py", "tests/test_templates.py"]
+body = """
+Implement src/privasheet/templates.py per spec section 4.1 (Template JSON and its Rules).
+- validate_template(doc: dict) -> list[str]: returns human-readable errors (empty list = valid). Check every rule in
+  4.1: key regex, unique keys (fields and tables share one namespace; columns unique per table), types, date format
+  required and built only from tokens DD, MM, MMM, YYYY, YY plus separators, region values, at least one key_label,
+  reserved arithmetic keys must be decimal, at most one table, columns default required=true, rules.tolerance is a
+  decimal string, match.min_key_label_ratio in (0, 1].
+- class TemplateError(ValueError) and ensure_valid(doc) raising it with all errors.
+- Helpers used later: field_keys(doc), table(doc, key), key_labels(doc).
+Acceptance: tests cover the spec example as valid and one failing case per rule.
+"""
+
+[[task]]
+id = "APP-02"
+title = "validate: decimal and date parsing"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/validate/__init__.py", "src/privasheet/validate/parse.py", "tests/test_validate_parse.py"]
+body = """
+Implement src/privasheet/validate/parse.py per spec section 6 ("Decimal grammar") and 4.1 (date format tokens).
+- parse_decimal(text: str) -> str | None: canonical plain decimal string (e.g. "1,284.00" -> "1284.00",
+  "(12.50)" -> "-12.50", "$ 5" -> "5"), None when the text breaks the grammar. Follow the grammar exactly: one optional
+  currency marker ($, €, £, ¥, ฿ or a 3-letter uppercase code) at start or end, balanced parentheses, max 15 integer
+  digits, "," only as thousands separator ("12,34" rejected), up to 4 decimals. Keep the decimals as written.
+- parse_date(text: str, fmt: str) -> str | None: ISO YYYY-MM-DD, None if it does not match the format or is not a real
+  date. Tokens DD, MM, MMM (English month abbreviations, case-insensitive), YYYY, YY (2000-2099); other characters are
+  literal separators. Whitespace is normalized.
+- is_canonical_decimal(text) and is_canonical_date(text) for review values (spec 4.3 Review).
+Use decimal.Decimal where arithmetic is needed; no floats. Acceptance: table-driven tests for valid and invalid inputs.
+"""
+
+[[task]]
+id = "APP-03"
+title = "validate: field, table and evidence checks"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/validate/checks.py", "tests/test_validate_checks.py"]
+depends_on = ["APP-01", "APP-02"]
+body = """
+Implement src/privasheet/validate/checks.py per spec section 6 (all checks except the arithmetic ones) and 4.3.
+Pure functions, no I/O.
+- Issue = dataclass(code, target, detail); target like "total" or "line_items[2].qty".
+- check_extraction(template, snapshot, extracted) -> (values, issues): builds canonical values from extracted raw
+  text using template types and the parse functions (PARSE_ERROR), and runs TEMPLATE_MISMATCH (difflib ratio >= 0.8
+  or containment, lower-cased and whitespace-normalized, against match.min_key_label_ratio), REQUIRED_MISSING (fields,
+  required tables with no rows, required columns in rows), UNGROUNDED_VALUE (raw is None but not missing),
+  DUPLICATE_BOX (same box id and same span used by two different fields or cells), LOW_OCR_SCORE (< 0.80).
+- check_review(template, review) -> issues: validates canonical review values (null means missing) and runs only the
+  checks that do not need OCR evidence.
+Use the JSON shapes from spec 4.2 and 4.3 in test fixtures. Arithmetic checks come in APP-04.
+"""
+
+[[task]]
+id = "APP-04"
+title = "validate: arithmetic reconciliation"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/validate/arithmetic.py", "src/privasheet/validate/checks.py", "tests/test_validate_arithmetic.py"]
+depends_on = ["APP-03"]
+body = """
+Implement src/privasheet/validate/arithmetic.py per spec section 6 "Arithmetic" and wire it into check_extraction and
+check_review from APP-03.
+- LINE_AMOUNT_MISMATCH, SUBTOTAL_MISMATCH, TOTAL_MISMATCH, RECONCILIATION_UNAVAILABLE with exactly the applicability
+  rules in the spec (which columns/fields must exist, required operands, discount/shipping/tax count as 0 only when not
+  defined or reported missing, an unparsed value raises RECONCILIATION_UNAVAILABLE).
+- decimal.Decimal with a 28-digit local context; compare without rounding against rules.tolerance (default 0.01).
+- detail strings show the numbers, e.g. "subtotal 1200.00 + tax 84.00 = 1284.00, total 1248.00".
+Acceptance: tests for each rule, tolerance boundaries (exactly 0.01 passes, 0.0100001 fails), negatives in
+parentheses, and the same results through check_review.
+"""
+
+[[task]]
+id = "APP-05"
+title = "export: JSONL content for a batch"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/export.py", "tests/test_export.py"]
+depends_on = ["APP-01"]
+body = """
+Implement src/privasheet/export.py per spec section 4.5 (and 4.3 for where values come from).
+- class ExportNotAllowed(ValueError).
+- build_jsonl(manifest: dict, results: dict[result_id, dict], template: dict) -> str: raises ExportNotAllowed when any
+  document is queued, processing or needs_review; one line per passed or reviewed document in manifest order; failed
+  documents left out; values from review when present else extracted canonical values; human_reviewed true only for
+  reviewed; every template field and table column present (null when missing); schema_version 1; compact JSON with
+  ensure_ascii=False; each line ends with a newline.
+- failed_documents(manifest, results) -> list of source_file for the UI.
+- write_atomic(path, text): write to a temporary file in the same directory, flush, fsync, os.replace.
+Acceptance: tests match the spec example line exactly, ordering, eligibility errors, atomic write leaves no temp file.
+"""
+
+[[task]]
+id = "APP-06"
+title = "store: connection, schema v1 and migrations"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/store/__init__.py", "src/privasheet/store/db.py", "src/privasheet/store/schema.py", "tests/test_store_schema.py"]
+body = """
+Implement the SQLite layer per spec section 4 (table list, bullets under the table, Migrations) and 5.4 (Connections).
+- open_db(path) -> sqlite3.Connection: isolation_level=None, row factory, PRAGMA foreign_keys=ON, busy_timeout=5000,
+  WAL; refuses (StoreError) when sqlite3.sqlite_version < 3.38 or JSON functions are unavailable.
+- transaction(conn) context manager: BEGIN IMMEDIATE / COMMIT / ROLLBACK.
+- MIGRATIONS list; migrate(conn) applies each pending migration and sets PRAGMA user_version in the same transaction;
+  refuses a database whose user_version is newer than supported.
+- Schema v1: tables templates, documents, snapshots, batches, results exactly as in the spec table, doc TEXT NOT NULL
+  CHECK (json_valid(doc)), generated lookup columns (json_extract), generated FK columns with REFERENCES, indexes on
+  queried lookups (results.batch_id, results.status).
+- dumps(doc)/loads(text) with ensure_ascii=False, allow_nan=False.
+Acceptance: tests for fresh migrate, idempotent re-run, a migration failing midway leaves the old version intact,
+newer version refused, json_valid check, generated columns follow doc, foreign keys enforced.
+"""
+
+[[task]]
+id = "APP-07"
+title = "store: repository operations"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/store/repo.py", "tests/test_store_repo.py"]
+depends_on = ["APP-06"]
+body = """
+Implement src/privasheet/store/repo.py per spec sections 4.1-4.4 and 5.4. No business rules.
+- insert_template(conn, doc) (insert-only; duplicate (template_id, version) raises), get_template(conn, id, version),
+  latest_template(conn, id), list_templates(conn).
+- insert_snapshot(conn, doc) that ignores an existing identical snapshot_id; get_snapshot.
+- create_batch(conn, manifest, documents, results): documents rows, queued results and the batch row in one
+  transaction.
+- get_result, list_results(conn, batch_id) in manifest order.
+- update_result_review(conn, result_id, expected_revision, doc) and commit_worker_outcome(conn, result_id,
+  expected_revision, expected_job, doc): single UPDATE ... WHERE revision = ? (AND job = ?), increment revision,
+  return False when no row was updated.
+- read_transaction(conn) for consistent multi-query reads.
+Acceptance: tests for each function, revision and job conflicts, create_batch rollback when one insert fails.
+"""
+
+[[task]]
+id = "APP-08"
+title = "ingest: upload checks and limits"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/ingest/__init__.py", "src/privasheet/ingest/checks.py", "tests/test_ingest_checks.py"]
+body = """
+Implement upload validation per spec section 7 (Upload limits table). Uses Pillow and pypdfium2 only for header and
+page-count reads; never decodes full images or renders pages here; never opens URLs.
+- Limits dataclass with the spec defaults (25 MB, 50 files, 10 pages, 40 megapixels, 200 DPI).
+- detect_type(first_bytes) -> "pdf" | "jpeg" | "png" | "tiff" | None by file signature (not extension).
+- copy_limited(src_stream, dst_path, max_bytes): streams and aborts (IngestError, partial file removed) when exceeded.
+- inspect(path, kind, limits) -> PageInfo list: page count (PDF via pypdfium2, TIFF frames via Pillow n_frames),
+  per-page pixel count from image headers or PDF page size x DPI; IngestError with a clear code when a limit is broken.
+- check_batch_size(n, limits).
+Build test fixtures in tests with Pillow (PNG, JPEG, multi-frame TIFF, image saved as PDF); no binary files committed.
+"""
+
+[[task]]
+id = "APP-09"
+title = "ingest: render page images"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/ingest/render.py", "tests/test_ingest_render.py"]
+depends_on = ["APP-08"]
+body = """
+Implement src/privasheet/ingest/render.py per spec section 3 (ingest unit) and 4.2 (page images).
+- render_pages(path, kind, limits) -> list[PIL.Image.Image] in RGB: PDF pages rendered with pypdfium2 at limits DPI,
+  images opened with Pillow with EXIF orientation applied (ImageOps.exif_transpose), every TIFF frame read.
+  Re-checks pixel limits before rendering or decoding.
+- canonical_page_bytes(image) -> bytes (RGB bytes plus width and height) for the snapshot hash.
+- save_png_atomic(image, path): temp file, flush, fsync, os.replace.
+Acceptance: tests with Pillow-built fixtures: EXIF-rotated JPEG comes out upright, 3-frame TIFF gives 3 pages, PDF page
+size matches DPI, pixel limit enforced, determinism of canonical bytes.
+"""
