@@ -5,7 +5,6 @@ from math import ceil
 from pathlib import Path
 from typing import BinaryIO, Literal
 
-
 Kind = Literal["pdf", "jpeg", "png", "tiff"]
 
 
@@ -71,7 +70,7 @@ def copy_limited(src_stream: BinaryIO, dst_path: str | Path, max_bytes: int) -> 
                         f"Upload exceeds the {max_bytes} byte limit.",
                     )
                 dst.write(chunk)
-    except Exception:
+    except (IngestError, OSError):
         path.unlink(missing_ok=True)
         raise
 
@@ -103,21 +102,21 @@ def inspect(path: str | Path, kind: Kind | str, limits: Limits) -> list[PageInfo
 
 
 def _inspect_image(path: str | Path) -> list[PageInfo]:
-    try:
-        from PIL import Image
+    from PIL import Image
 
+    try:
         with Image.open(path) as image:
             return [_page_info(1, image.size[0], image.size[1])]
     except IngestError:
         raise
-    except Exception as exc:
+    except (OSError, ValueError) as exc:
         raise IngestError("INSPECT_FAILED", f"Could not inspect image header: {exc}.")
 
 
 def _inspect_tiff(path: str | Path) -> list[PageInfo]:
-    try:
-        from PIL import Image
+    from PIL import Image
 
+    try:
         with Image.open(path) as image:
             frame_count = getattr(image, "n_frames", 1)
             pages = []
@@ -127,14 +126,15 @@ def _inspect_tiff(path: str | Path) -> list[PageInfo]:
             return pages
     except IngestError:
         raise
-    except Exception as exc:
+    except (EOFError, OSError, ValueError) as exc:
         raise IngestError("INSPECT_FAILED", f"Could not inspect TIFF header: {exc}.")
 
 
 def _inspect_pdf(path: str | Path, limits: Limits) -> list[PageInfo]:
-    try:
-        import pypdfium2 as pdfium
+    import pypdfium2 as pdfium
 
+    pdfium_error = getattr(pdfium, "PdfiumError", RuntimeError)
+    try:
         document = pdfium.PdfDocument(str(path))
         try:
             pages = []
@@ -152,7 +152,7 @@ def _inspect_pdf(path: str | Path, limits: Limits) -> list[PageInfo]:
             document.close()
     except IngestError:
         raise
-    except Exception as exc:
+    except (OSError, ValueError, pdfium_error) as exc:
         raise IngestError("INSPECT_FAILED", f"Could not inspect PDF header: {exc}.")
 
 
