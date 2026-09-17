@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from privasheet.templates import key_labels
+from privasheet.validate.arithmetic import check_arithmetic
 from privasheet.validate.parse import (
     is_canonical_date,
     is_canonical_decimal,
@@ -77,7 +78,7 @@ def _values(template: dict, data: dict, check_value, issues: list[Issue]) -> dic
 def check_extraction(
     template: dict, snapshot: dict, extracted: dict
 ) -> tuple[dict, list[Issue]]:
-    """Return canonical ``{fields, tables}`` values and non-arithmetic issues.
+    """Return canonical ``{fields, tables}`` values and validation issues.
 
     Inputs are never modified. The template and evidence references are already
     schema-validated upstream (§5.3); this checks raw text and OCR quality.
@@ -153,6 +154,17 @@ def check_extraction(
         return value
 
     values = _values(template, extracted, check_value, issues)
+    issues.extend(
+        check_arithmetic(
+            template,
+            values,
+            {
+                issue.target
+                for issue in issues
+                if issue.code in {"PARSE_ERROR", "UNGROUNDED_VALUE"}
+            },
+        )
+    )
     return values, issues
 
 
@@ -180,5 +192,12 @@ def check_review(template: dict, review: dict) -> list[Issue]:
             )
         return value
 
-    _values(template, review, check_value, issues)
+    values = _values(template, review, check_value, issues)
+    issues.extend(
+        check_arithmetic(
+            template,
+            values,
+            {issue.target for issue in issues if issue.code == "PARSE_ERROR"},
+        )
+    )
     return issues
