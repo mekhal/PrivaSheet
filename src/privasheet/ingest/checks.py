@@ -93,7 +93,7 @@ def inspect(path: str | Path, kind: Kind | str, limits: Limits) -> list[PageInfo
     elif kind in {"jpeg", "png"}:
         pages = _inspect_image(path)
     elif kind == "tiff":
-        pages = _inspect_tiff(path)
+        pages = _inspect_tiff(path, limits)
     else:
         raise IngestError("UNSUPPORTED_TYPE", f"Unsupported upload type: {kind}.")
 
@@ -118,7 +118,7 @@ def _inspect_image(path: str | Path) -> list[PageInfo]:
         raise IngestError("INSPECT_FAILED", f"Could not inspect image header: {exc}.")
 
 
-def _inspect_tiff(path: str | Path) -> list[PageInfo]:
+def _inspect_tiff(path: str | Path, limits: Limits) -> list[PageInfo]:
     from PIL import Image
 
     try:
