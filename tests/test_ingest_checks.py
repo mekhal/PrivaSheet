@@ -150,3 +150,17 @@ def test_inspect_rejects_unknown_kind(tmp_path):
     path = tmp_path / "doc.bin"
     path.write_bytes(b"not a document")
     assert_error_code("UNSUPPORTED_TYPE", inspect, path, "gif", Limits())
+
+
+@pytest.mark.parametrize(
+    ("filename", "kind"),
+    [
+        ("bad.png", "png"),
+        ("bad.tiff", "tiff"),
+        ("bad.pdf", "pdf"),
+    ],
+)
+def test_inspect_reports_clear_code_for_malformed_uploads(tmp_path, filename, kind):
+    path = tmp_path / filename
+    path.write_bytes(b"not a valid upload")
+    assert_error_code("INSPECT_FAILED", inspect, path, kind, Limits())
