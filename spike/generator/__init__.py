@@ -1,18 +1,22 @@
 """Deterministic synthetic invoices; all identities and addresses are fictional."""
 
-from datetime import date, timedelta
-from decimal import Decimal, ROUND_HALF_UP
 import json
-from pathlib import Path
 import random
+from datetime import date, timedelta
+from decimal import ROUND_HALF_UP, Decimal
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
 SIZE = (1240, 1754)  # A4 millimetres converted to pixels at 150 DPI, rounded.
 FONT_DIR = Path("/usr/share/fonts/truetype/dejavu")
 DESCRIPTIONS = (
-    "Synthetic widget batch", "Demo calibration kit", "Fictional sample module",
-    "Test packaging set", "Mock assembly service", "Synthetic inspection unit",
+    "Synthetic widget batch",
+    "Demo calibration kit",
+    "Fictional sample module",
+    "Test packaging set",
+    "Mock assembly service",
+    "Synthetic inspection unit",
 )
 
 
@@ -24,8 +28,14 @@ def make_invoice(seed, index):
     for description in rng.sample(DESCRIPTIONS, rng.randint(2, 6)):
         qty = rng.randint(1, 9)
         price = Decimal(rng.randint(101, 50000)) / Decimal(100)
-        rows.append({"description": description, "qty": str(qty),
-                     "unit_price": f"{price:.2f}", "amount": f"{price * qty:.2f}"})
+        rows.append(
+            {
+                "description": description,
+                "qty": str(qty),
+                "unit_price": f"{price:.2f}",
+                "amount": f"{price * qty:.2f}",
+            }
+        )
     subtotal = sum((Decimal(row["amount"]) for row in rows), Decimal(0))
     tax = (subtotal * Decimal("0.07")).quantize(Decimal("0.01"), ROUND_HALF_UP)
     return {
@@ -36,8 +46,10 @@ def make_invoice(seed, index):
             "due_date": (issued + timedelta(days=30)).isoformat(),
             "vendor_name": f"SYNTHETIC Vendor-{rng.randrange(1000):03d}",
             "customer_name": f"SYNTHETIC Customer-{rng.randrange(1000):03d}",
-            "currency": "USD", "subtotal": f"{subtotal:.2f}",
-            "tax": f"{tax:.2f}", "total": f"{subtotal + tax:.2f}",
+            "currency": "USD",
+            "subtotal": f"{subtotal:.2f}",
+            "tax": f"{tax:.2f}",
+            "total": f"{subtotal + tax:.2f}",
         },
         "tables": {"line_items": rows},
     }
@@ -54,7 +66,9 @@ def render_invoice(invoice, destination):
         key = (size, bold)
         if key not in fonts:
             fonts[key] = ImageFont.truetype(
-                str(FONT_DIR / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")), size)
+                str(FONT_DIR / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")),
+                size,
+            )
         font = fonts[key]
         if right:
             x -= draw.textlength(value, font=font)
@@ -81,16 +95,24 @@ def render_invoice(invoice, destination):
         party(70, 255, "SUPPLIER", fields["vendor_name"], "VENDOR")
         party(690, 255, "CUSTOMER", fields["customer_name"], "CUSTOMER")
         meta_x, meta_y = 70, 465
-    for offset, (label, key) in enumerate((
-        ("Invoice no", "invoice_no"), ("Invoice date", "invoice_date"),
-        ("Due date", "due_date"), ("Currency", "currency"),
-    )):
+    for offset, (label, key) in enumerate(
+        (
+            ("Invoice no", "invoice_no"),
+            ("Invoice date", "invoice_date"),
+            ("Due date", "due_date"),
+            ("Currency", "currency"),
+        )
+    ):
         text(meta_x, meta_y + offset * 39, f"{label}: {fields[key]}", 24)
 
     top = 720
     draw.rectangle((70, top, 1170, top + 58), fill=accent)
-    for x, title, right in ((90, "Description", False), (750, "Qty", True),
-                            (950, "Unit price", True), (1150, "Amount", True)):
+    for x, title, right in (
+        (90, "Description", False),
+        (750, "Qty", True),
+        (950, "Unit price", True),
+        (1150, "Amount", True),
+    ):
         text(x, top + 14, title, 23, True, right, "white")
     for index, row in enumerate(invoice["tables"]["line_items"]):
         y = top + 58 + index * 70
@@ -101,15 +123,18 @@ def render_invoice(invoice, destination):
             text(x, y + 20, row[key], 23, right=True)
         draw.line((70, y + 70, 1170, y + 70), fill="#d4dce5", width=1)
     totals_y = 1260
-    for index, (label, key) in enumerate((("Subtotal", "subtotal"), ("Tax (7%)", "tax"),
-                                         ("Total (USD)", "total"))):
+    for index, (label, key) in enumerate(
+        (("Subtotal", "subtotal"), ("Tax (7%)", "tax"), ("Total (USD)", "total"))
+    ):
         y = totals_y + index * 60
         if key == "total":
             draw.rectangle((670, y - 8, 1170, y + 48), fill="#edf3f8")
         text(690, y, label, 25, key == "total")
         text(1150, y, fields[key], 25, key == "total", right=True)
     draw.line((70, 1570, 1170, 1570), fill=accent, width=2)
-    text(70, 1600, "Generated for testing only. No payment or tax identifiers exist.", 22)
+    text(
+        70, 1600, "Generated for testing only. No payment or tax identifiers exist.", 22
+    )
     image.save(destination, format="PNG", dpi=(150, 150))
 
 
@@ -123,5 +148,6 @@ def generate(out, count, seed):
         invoice = make_invoice(seed, index)
         stem = out / f"invoice-{index + 1:02d}"
         stem.with_suffix(".json").write_text(
-            json.dumps(invoice, separators=(",", ":")) + "\n", encoding="utf-8")
+            json.dumps(invoice, separators=(",", ":")) + "\n", encoding="utf-8"
+        )
         render_invoice(invoice, stem.with_suffix(".png"))
