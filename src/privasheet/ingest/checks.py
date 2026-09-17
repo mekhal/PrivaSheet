@@ -109,6 +109,11 @@ def _inspect_image(path: str | Path) -> list[PageInfo]:
             return [_page_info(1, image.size[0], image.size[1])]
     except IngestError:
         raise
+    except Image.DecompressionBombError as exc:
+        raise IngestError(
+            "PIXEL_LIMIT_EXCEEDED",
+            f"Image header declares too many pixels: {exc}.",
+        )
     except (OSError, ValueError) as exc:
         raise IngestError("INSPECT_FAILED", f"Could not inspect image header: {exc}.")
 
@@ -119,6 +124,11 @@ def _inspect_tiff(path: str | Path) -> list[PageInfo]:
     try:
         with Image.open(path) as image:
             frame_count = getattr(image, "n_frames", 1)
+            if frame_count > limits.max_pages:
+                raise IngestError(
+                    "PAGE_LIMIT_EXCEEDED",
+                    f"Upload has {frame_count} pages; limit is {limits.max_pages}.",
+                )
             pages = []
             for index in range(frame_count):
                 image.seek(index)
@@ -126,6 +136,11 @@ def _inspect_tiff(path: str | Path) -> list[PageInfo]:
             return pages
     except IngestError:
         raise
+    except Image.DecompressionBombError as exc:
+        raise IngestError(
+            "PIXEL_LIMIT_EXCEEDED",
+            f"TIFF header declares too many pixels: {exc}.",
+        )
     except (EOFError, OSError, ValueError) as exc:
         raise IngestError("INSPECT_FAILED", f"Could not inspect TIFF header: {exc}.")
 
@@ -137,8 +152,14 @@ def _inspect_pdf(path: str | Path, limits: Limits) -> list[PageInfo]:
     try:
         document = pdfium.PdfDocument(str(path))
         try:
+            page_count = len(document)
+            if page_count > limits.max_pages:
+                raise IngestError(
+                    "PAGE_LIMIT_EXCEEDED",
+                    f"Upload has {page_count} pages; limit is {limits.max_pages}.",
+                )
             pages = []
-            for index in range(len(document)):
+            for index in range(page_count):
                 page = document[index]
                 try:
                     width_pt, height_pt = page.get_size()

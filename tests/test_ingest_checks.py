@@ -146,6 +146,66 @@ def test_inspect_rejects_pages_over_pixel_limit(tmp_path, filename, kind, make):
     )
 
 
+@pytest.mark.parametrize("kind", ["png", "tiff"])
+def test_inspect_translates_pillow_decompression_bomb(monkeypatch, tmp_path, kind):
+    from PIL import Image
+
+    def bomb(_path):
+        raise Image.DecompressionBombError("declared dimensions are too large")
+
+    monkeypatch.setattr(Image, "open", bomb)
+    path = tmp_path / f"doc.{kind}"
+    path.write_bytes(b"placeholder")
+
+    assert_error_code("PIXEL_LIMIT_EXCEEDED", inspect, path, kind, Limits())
+
+
+def test_inspect_pdf_rejects_page_limit_before_opening_pages(monkeypatch, tmp_path):
+    import pypdfium2 as pdfium
+
+    class FakePdfDocument:
+        def __init__(self, _path):
+            self.closed = False
+
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, _index):
+            raise AssertionError("page objects should not be opened after limit fails")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(pdfium, "PdfDocument", FakePdfDocument)
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"%PDF-1.7\n")
+
+    assert_error_code("PAGE_LIMIT_EXCEEDED", inspect, path, "pdf", Limits(max_pages=1))
+
+
+def test_inspect_tiff_rejects_page_limit_before_seeking_frames(monkeypatch, tmp_path):
+    from PIL import Image
+
+    class FakeTiff:
+        n_frames = 2
+        size = (10, 10)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def seek(self, _index):
+            raise AssertionError("TIFF frames should not be sought after limit fails")
+
+    monkeypatch.setattr(Image, "open", lambda _path: FakeTiff())
+    path = tmp_path / "doc.tiff"
+    path.write_bytes(b"II*\x00")
+
+    assert_error_code("PAGE_LIMIT_EXCEEDED", inspect, path, "tiff", Limits(max_pages=1))
+
+
 def test_inspect_rejects_unknown_kind(tmp_path):
     path = tmp_path / "doc.bin"
     path.write_bytes(b"not a document")
