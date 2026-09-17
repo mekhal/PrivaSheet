@@ -11,6 +11,8 @@ from privasheet.templates import (
     key_labels,
     table,
     validate_template,
+    valid_version_label,
+    version_label,
 )
 
 
@@ -29,6 +31,7 @@ def doc():
                 "type": "text",
                 "required": True,
                 "key_label": True,
+                "description": "The invoice number printed after Invoice No.",
                 "hint": {
                     "labels": ["Invoice No"],
                     "region": "top-right",
@@ -41,6 +44,7 @@ def doc():
                 "required": True,
                 "key_label": False,
                 "format": "DD/MM/YYYY",
+                "description": "The invoice issue date, not the due date.",
                 "hint": {
                     "labels": ["Date"],
                     "region": "top-right",
@@ -52,6 +56,7 @@ def doc():
                 "type": "decimal",
                 "required": True,
                 "key_label": True,
+                "description": "The final amount to pay including tax.",
                 "hint": {
                     "labels": ["Grand Total"],
                     "region": "bottom-right",
@@ -63,6 +68,7 @@ def doc():
             {
                 "key": "line_items",
                 "required": True,
+                "description": "One row per purchased item; skip summary rows.",
                 "columns": [
                     {"key": "description", "type": "text"},
                     {"key": "qty", "type": "decimal"},
@@ -76,7 +82,7 @@ def doc():
             }
         ],
         "rules": {"tolerance": "0.01"},
-        "match": {"min_key_label_ratio": 0.6},
+        "match": {"min_key_label_ratio": 0.9},
     }
 
 
@@ -187,7 +193,7 @@ def test_key_label_needs_first_label(doc, labels):
     "key",
     ["subtotal", "discount", "shipping", "tax", "total", "qty", "unit_price", "amount"],
 )
-def test_reserved_decimal_keys(doc, key):
+def test_arithmetic_keys_are_not_reserved(doc, key):
     items = (
         doc["tables"][0]["columns"]
         if key in {"qty", "unit_price", "amount"}
@@ -195,20 +201,22 @@ def test_reserved_decimal_keys(doc, key):
     )
     items[:] = [i for i in items if i["key"] != key]
     items.append({"key": key, "type": "text"})
-    assert any("decimal" in e for e in validate_template(doc))
+    if key not in {"qty", "unit_price", "amount"}:
+        items[-1]["description"] = f"Free text value for {key}."
+    assert validate_template(doc) == []
 
 
-def test_at_most_one_table(doc):
+def test_several_tables_allowed(doc):
     other = deepcopy(doc["tables"][0])
     other["key"] = "other"
     doc["tables"].append(other)
-    assert any("at most one table" in e for e in validate_template(doc))
+    assert validate_template(doc) == []
 
 
 @pytest.mark.parametrize("value", [0.01, None, "NaN", "Infinity", "1e-2", "oops", ""])
-def test_tolerance(doc, value):
+def test_tolerance_is_not_a_template_rule(doc, value):
     doc["rules"]["tolerance"] = value
-    assert any("tolerance" in e for e in validate_template(doc))
+    assert validate_template(doc) == []
 
 
 @pytest.mark.parametrize(
@@ -226,11 +234,12 @@ def test_boundaries_and_optional_sections(doc):
     assert validate_template(doc) == []
     del doc["tables"]
     del doc["rules"]
+    del doc["match"]
     assert validate_template(doc) == []
 
 
 @pytest.mark.parametrize(
-    "path,value", [("fields", None), ("tables", {}), ("rules", []), ("match", None)]
+    "path,value", [("fields", None), ("tables", {}), ("match", [])]
 )
 def test_malformed_sections(doc, path, value):
     doc[path] = value
@@ -245,6 +254,7 @@ def test_boolean_required(doc):
 def test_all_errors_raised(doc):
     doc["fields"][0]["key"] = "BAD"
     doc["rules"]["tolerance"] = "bad"
+    doc["tables"][0]["description"] = ""
     errors = validate_template(doc)
     assert len(errors) >= 2
     with pytest.raises(TemplateError) as exc:
@@ -257,6 +267,56 @@ def test_all_errors_raised(doc):
 def test_date_format_rejects_literal_letters_and_separator_only(doc, fmt):
     doc["fields"][1]["format"] = fmt
     assert any("format" in e for e in validate_template(doc))
+
+
+@pytest.mark.parametrize("scope", ["field", "table"])
+@pytest.mark.parametrize("value", [None, "", "   ", "x" * 501])
+def test_field_and_table_description_required(doc, scope, value):
+    item = doc["fields"][0] if scope == "field" else doc["tables"][0]
+    if value is None:
+        item.pop("description", None)
+    else:
+        item["description"] = value
+    assert any("description" in e for e in validate_template(doc))
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", "x" * 501])
+def test_column_description_optional(doc, value):
+    column = doc["tables"][0]["columns"][0]
+    if value is not None:
+        column["description"] = value
+    assert validate_template(doc) == []
+
+
+def test_match_ratio_defaults_to_approved_value(doc):
+    doc["match"].pop("min_key_label_ratio")
+    assert validate_template(doc) == []
+    del doc["match"]
+    assert validate_template(doc) == []
+
+
+def test_version_label():
+    from datetime import date
+
+    assert version_label(date(2026, 9, 17), 0) == "1.0.20260917"
+    assert version_label(date(2026, 9, 17), 1) == "1.1.20260917"
+    assert version_label(date(2026, 9, 18), 0) == "1.0.20260918"
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["1.0.20260917", "1.12.20260917", "1.0.19991231"],
+)
+def test_valid_version_label(label):
+    assert valid_version_label(label) is True
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["", "2.0.20260917", "1.-1.20260917", "1.0.2026917", "1.0.20261301", 1],
+)
+def test_invalid_version_label(label):
+    assert valid_version_label(label) is False
 
 
 @pytest.mark.parametrize("value", [None, [], "template"])
