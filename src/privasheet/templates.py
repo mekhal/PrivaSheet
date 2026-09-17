@@ -2,10 +2,11 @@
 
 import re
 from copy import deepcopy
+from datetime import date
 
 _KEY = re.compile(r"[a-z][a-z0-9_]{0,39}")
 _DATE_FORMAT = re.compile(r"(?:YYYY|MMM|DD|MM|YY|[^\w])+")
-_DECIMAL = re.compile(r"[+-]?[0-9]+(?:\.[0-9]+)?")
+_VERSION_LABEL = re.compile(r"1\.(0|[1-9][0-9]*)\.([0-9]{8})")
 _REGIONS = (
     "top-left",
     "top",
@@ -17,8 +18,6 @@ _REGIONS = (
     "bottom",
     "bottom-right",
 )
-_FIELD_ARITHMETIC = ("subtotal", "discount", "shipping", "tax", "total")
-_COLUMN_ARITHMETIC = ("qty", "unit_price", "amount")
 
 
 class TemplateError(ValueError):
@@ -65,7 +64,18 @@ def validate_template(doc: dict) -> list[str]:
             errors.append(f"{path}.hint.region must be one of {', '.join(_REGIONS)}")
         return hint
 
-    def check_type(item, path, reserved):
+    def check_description(item, path):
+        description = item.get("description")
+        if (
+            not isinstance(description, str)
+            or not description.strip()
+            or len(description) > 500
+        ):
+            errors.append(
+                f"{path}.description must be non-empty and at most 500 characters"
+            )
+
+    def check_type(item, path):
         kind = item.get("type")
         if kind not in ("text", "date", "decimal"):
             errors.append(f"{path}.type must be text, date or decimal")
@@ -80,8 +90,6 @@ def validate_template(doc: dict) -> list[str]:
                     f"{path}.format is required for date and must contain only "
                     "DD, MM, MMM, YYYY, YY tokens and separators"
                 )
-        if item.get("key") in reserved and kind != "decimal":
-            errors.append(f"{path} reserved key {item['key']!r} must have type decimal")
 
     seen = set()
     has_key_label = False
@@ -89,7 +97,8 @@ def validate_template(doc: dict) -> list[str]:
         path = f"fields[{index}]"
         item = obj(value, path)
         check_key(item, path, seen)
-        check_type(item, path, _FIELD_ARITHMETIC)
+        check_description(item, path)
+        check_type(item, path)
         hint = check_common(item, path)
         if item.get("key_label") is True:
             has_key_label = True
@@ -105,12 +114,11 @@ def validate_template(doc: dict) -> list[str]:
         errors.append("template needs at least one key label (key_label: true)")
 
     tables = array(doc.get("tables", []), "tables")
-    if len(tables) > 1:
-        errors.append("template supports at most one table")
     for index, value in enumerate(tables):
         path = f"tables[{index}]"
         item = obj(value, path)
         check_key(item, path, seen)
+        check_description(item, path)
         check_common(item, path)
         column_keys = set()
         for col_index, value in enumerate(
@@ -119,22 +127,48 @@ def validate_template(doc: dict) -> list[str]:
             col_path = f"{path}.columns[{col_index}]"
             column = obj(value, col_path)
             check_key(column, col_path, column_keys)
-            check_type(column, col_path, _COLUMN_ARITHMETIC)
+            check_type(column, col_path)
             check_common(column, col_path)
 
-    rules = obj(doc.get("rules", {}), "rules")
-    tolerance = rules.get("tolerance", "0.01")
-    if not isinstance(tolerance, str) or not _DECIMAL.fullmatch(tolerance):
-        errors.append("rules.tolerance must be a decimal string")
-    match = obj(doc.get("match"), "match")
-    ratio = match.get("min_key_label_ratio")
-    if (
-        isinstance(ratio, bool)
-        or not isinstance(ratio, (int, float))
-        or not 0 < ratio <= 1
-    ):
-        errors.append("match.min_key_label_ratio must be a number in (0, 1]")
+    match = obj(doc.get("match", {}), "match")
+    if "min_key_label_ratio" in match:
+        ratio = match["min_key_label_ratio"]
+        if (
+            isinstance(ratio, bool)
+            or not isinstance(ratio, (int, float))
+            or not 0 < ratio <= 1
+        ):
+            errors.append("match.min_key_label_ratio must be a number in (0, 1]")
     return errors
+
+
+def version_label(saved_on: date, earlier_saves_that_day: int) -> str:
+    """Return a user-facing template version label for a local save date."""
+    if not isinstance(saved_on, date):
+        raise TypeError("saved_on must be a date")
+    if isinstance(earlier_saves_that_day, bool) or not isinstance(
+        earlier_saves_that_day, int
+    ):
+        raise TypeError("earlier_saves_that_day must be an integer")
+    if earlier_saves_that_day < 0:
+        raise ValueError("earlier_saves_that_day must be non-negative")
+    return f"1.{earlier_saves_that_day}.{saved_on:%Y%m%d}"
+
+
+def valid_version_label(label: str) -> bool:
+    """Return true when ``label`` has the approved ``1.<n>.<YYYYMMDD>`` shape."""
+    if not isinstance(label, str):
+        return False
+    match = _VERSION_LABEL.fullmatch(label)
+    if not match:
+        return False
+    try:
+        date.fromisoformat(
+            f"{match.group(2)[:4]}-{match.group(2)[4:6]}-{match.group(2)[6:]}"
+        )
+    except ValueError:
+        return False
+    return True
 
 
 def ensure_valid(doc: dict) -> None:
