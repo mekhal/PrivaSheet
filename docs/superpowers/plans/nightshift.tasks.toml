@@ -37,3 +37,37 @@ same output; both layouts are produced; a PNG has the expected size.
 
 Keep the whole change under 350 changed text lines (the PNGs do not count). Commit nothing; the orchestrator commits.
 """
+
+[[task]]
+id = "SPK-02"
+title = "Realistic scan and phone-photo variants of synthetic invoices"
+tier = "green"
+review = "joint"
+paths = ["spike/**"]
+depends_on = ["SPK-01"]
+body = """
+Real inputs are mostly scanned paper invoices and phone photos. Extend the generator from SPK-01 so synthetic
+invoices look like that. All data stays fake. Pillow and the standard library only (no numpy, no network, no new
+packages). Use /home/agent/work/.venv/bin/python.
+
+1. Printed formats vary (deterministic from the seed). The ground-truth JSON keeps exactly the same shape and
+   canonical values as SPK-01 (ISO dates, plain decimals).
+   - Dates: one of "2026-11-14", "14 Nov 2026", "Nov 14, 2026", "14/11/2026".
+   - Money: one of "1285.58", "1,285.58", "$1,285.58".
+2. Degradation styles, chosen with a new CLI option --style clean|scan|photo|mixed (default mixed):
+   - scan: grayscale, small rotation (up to +/-1.5 degrees), light speckle noise, slight blur, uneven brightness,
+     JPEG-like compression artifacts, faint border shadow.
+   - photo: paper placed on a darker background, perspective distortion (as if photographed at an angle),
+     rotation up to +/-5 degrees, a soft shadow or lighting gradient across the page, lower resolution, slight blur.
+   Text must stay readable by a human.
+3. Generate a new demo set and keep the SPK-01 clean demo unchanged:
+   /home/agent/work/.venv/bin/python -m spike.generator --out spike/samples/demo-realistic --count 5 --seed 7 --style mixed
+   The 5 invoices must include at least 2 scan and 2 photo, using both layouts.
+4. Same seed and style produce identical PNG bytes and JSON.
+
+Tests (spike/tests/): each style produces an image that differs from the clean render; determinism per style;
+printed formats vary across seeds while JSON stays canonical; mixed produces both scan and photo; existing SPK-01
+tests still pass unchanged.
+
+Keep the change under 350 changed text lines (PNGs do not count). Commit nothing; the orchestrator commits.
+"""
