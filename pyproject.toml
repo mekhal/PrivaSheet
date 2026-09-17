@@ -7,10 +7,17 @@ name = "privasheet"
 version = "0.0.1"
 description = "Local template-based invoice extraction"
 requires-python = ">=3.12"
-dependencies = ["pillow>=10.1", "pypdfium2>=4.30"]
+dependencies = [
+    "pillow>=10.1",
+    "pypdfium2>=4.30",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "ruff", "httpx"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -18,3 +25,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
 testpaths = ["tests", "spike/tests"]
+
+[tool.setuptools.package-data]
+"privasheet.web" = ["static/**/*", "templates/**/*"]
