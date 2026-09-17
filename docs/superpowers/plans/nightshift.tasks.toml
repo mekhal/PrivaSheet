@@ -254,3 +254,273 @@ Implement src/privasheet/ingest/render.py per spec section 3 (ingest unit) and 4
 Acceptance: tests with Pillow-built fixtures: EXIF-rotated JPEG comes out upright, 3-frame TIFF gives 3 pages, PDF page
 size matches DPI, pixel limit enforced, determinism of canonical bytes.
 """
+
+# ---------------------------------------------------------------------------
+# Work set B — align with the approved spec + extraction core + web frontend. Agreed with maintainer 2026-09-18.
+# Spec (approved): docs/superpowers/specs/2026-09-16-template-extraction-design.md. Read the sections named in each task.
+# Installed: pillow, pypdfium2, fastapi, uvicorn, jinja2, python-multipart, httpx, pytest, ruff. No network, no new deps.
+# Frontend: Bootstrap 5.3.8, React 18.3.1 (UMD) and htm 3.1.1 are vendored in src/privasheet/web/static/vendor/
+# (do not modify vendor files). No build step, no JSX: React components use htm tagged templates.
+# JavaScript unit tests (pure logic only) go in tests/js/*.test.mjs and run with: node --test tests/js
+# ---------------------------------------------------------------------------
+
+[[task]]
+id = "FIX-01"
+title = "templates: align with approved spec"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/templates.py", "src/privasheet/presets.py", "tests/test_templates.py", "tests/test_presets.py"]
+body = """
+Update src/privasheet/templates.py (from APP-01) to the approved spec sections 4.1 and 5.1:
+- description is required (non-empty, <= 500 chars) for every field and table; optional for columns.
+- Several tables are allowed (remove the at-most-one-table rule).
+- Remove the arithmetic rules: reserved decimal keys and rules.tolerance are no longer validated or required.
+- match.min_key_label_ratio default is 0.9.
+- version_label(saved_on: date, earlier_saves_that_day: int) -> "1.<n>.<YYYYMMDD>" and a validator for the format.
+Add src/privasheet/presets.py with the hashtag presets listed in spec 5.1 step 2 (each preset: tag, key, type, kind
+field|table, starter description, columns for tables) plus the #required flag, and search_presets(prefix).
+Acceptance: tests updated for every changed rule; tests for version_label and presets (every preset produces a valid
+field or table definition).
+"""
+
+[[task]]
+id = "FIX-02"
+title = "validate: remove arithmetic, add uncertain and duplicate issues"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/validate/**", "tests/test_validate_checks.py", "tests/test_validate_arithmetic.py", "tests/test_validate_parse.py"]
+depends_on = ["FIX-01"]
+body = """
+Align src/privasheet/validate with approved spec section 6 (D11: no arithmetic):
+- Delete validate/arithmetic.py and its wiring; replace tests/test_validate_arithmetic.py with a test that
+  check_extraction and check_review never emit LINE_AMOUNT_MISMATCH, SUBTOTAL_MISMATCH, TOTAL_MISMATCH or
+  RECONCILIATION_UNAVAILABLE even when numbers do not add up.
+- Extracted evidence may be {"uncertain": true, "reason": "..."} (spec 5.3): emit AI_UNCERTAIN with the reason as
+  detail and value null.
+- Add the DUPLICATE_DOCUMENT and PROCESSING_TIMEOUT issue codes as constants (raised by pipeline, not by checks).
+- LOW_OCR_SCORE threshold 0.90; TEMPLATE_MISMATCH uses the template ratio (default 0.9).
+- Checks work across several tables and rows whose boxes are on different pages.
+"""
+
+[[task]]
+id = "FIX-03"
+title = "export: selected documents"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/export.py", "tests/test_export.py"]
+depends_on = ["FIX-01"]
+body = """
+Align src/privasheet/export.py with approved spec section 4.5:
+- build_jsonl(manifest, results, template, selected_document_ids) exports only the selected documents, in manifest
+  order; raises ExportNotAllowed if any selected document is not passed or reviewed (rejected, needs_review, failed,
+  queued and processing are refused). The batch does not need to be finished.
+- selectable_documents(manifest, results) -> list of document_ids that may be selected.
+- export_filename(batch_id, now) -> "<batch_id>-<UTC timestamp>.jsonl".
+- Every table of the template is present in each line.
+"""
+
+[[task]]
+id = "FIX-04"
+title = "store: duplicates, rejected status, batch edits, document delete"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/store/**", "tests/test_store_schema.py", "tests/test_store_repo.py"]
+body = """
+Align the store with approved spec sections 4, 4.4, 5.2 and 8 (Storage):
+- Schema migration v2 (keep v1 migration intact): index on documents.sha256; templates carry version_label in doc.
+- find_documents_by_sha256(conn, sha256, before_document_id=None) for the duplicate check.
+- add_documents_to_batch(conn, batch_id, documents, results): appends manifest entries and queued results in one
+  transaction.
+- remove_queued_document(conn, batch_id, document_id): only when the result is queued; removes manifest entry, result
+  and document row in one transaction; returns the file path to delete, or raises when the document is locked.
+- delete_document(conn, document_id): refused while processing; removes manifest entry, result, document row unless
+  a template uses it as sample, and the snapshot if unreferenced; returns file paths to delete.
+- update_document_path(conn, document_id, path) for the process/ -> archive/ move.
+- Result statuses include rejected.
+"""
+
+[[task]]
+id = "FIX-05"
+title = "ingest: no file or page count limits"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/ingest/**", "tests/test_ingest_checks.py", "tests/test_ingest_render.py"]
+body = """
+Align ingest with approved spec section 7: remove the files-per-batch and pages-per-document limits (Limits fields,
+check_batch_size and PAGE_LIMIT_EXCEEDED). Keep file size, accepted types, pixels per page, PDF DPI and
+DecompressionBomb handling. Page inspection must still avoid decoding full images.
+"""
+
+[[task]]
+id = "CORE-01"
+title = "layout: reading-order lines"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/layout.py", "tests/test_layout.py"]
+body = """
+Implement src/privasheet/layout.py per spec section 3 (layout unit) and 5.3 (prompt line format).
+- lines(snapshot) -> list of pages, each a list of lines; a line is a list of box dicts ordered left to right.
+  Group boxes into lines by vertical overlap of their quads (normalized coordinates), order lines top to bottom.
+  Deterministic; ties broken by box id.
+- prompt_lines(snapshot) -> list[str] in the format "box_id | page | region | text", where region is one of the nine
+  region names from spec 4.1 computed from the box centre.
+Acceptance: tests with synthetic snapshots: two columns, slightly skewed baselines, multi-page, empty page.
+"""
+
+[[task]]
+id = "CORE-02"
+title = "evidence: grounding and response validation"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/evidence.py", "tests/test_evidence.py"]
+depends_on = ["FIX-01"]
+body = """
+Implement src/privasheet/evidence.py per spec section 5.3 (Response rules and the steps after them).
+- validate_response(template, snapshot, response) -> list[str] errors: every field and table key present; every row has
+  every column; each entry is {box_ids, span}, {missing: true} or {uncertain: true, reason}; box_ids non-empty without
+  duplicates and all present in the snapshot; reason non-empty <= 300 chars; no unknown keys.
+- ground(snapshot, box_ids, span) -> raw text or None: source = cited box texts joined with one space, whitespace
+  collapsed; span normalized the same way; case-sensitive first occurrence.
+- apply(template, snapshot, response) -> extracted structure of spec 4.3 (box_ids, span, raw; missing; uncertain with
+  reason).
+Pure functions. Acceptance: table-driven tests for every rule.
+"""
+
+[[task]]
+id = "CORE-03"
+title = "llm: loopback-only OpenAI-compatible client"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/llm.py", "tests/test_llm.py"]
+body = """
+Implement src/privasheet/llm.py per spec section 8 (LLM client) using only the standard library (http.client, json).
+This module is the only place allowed to open network connections.
+- LlmClient(base_url, model, timeout): refuses (LlmConfigError) unless the host is 127.0.0.1, ::1 or localhost and
+  every resolved address is loopback; no redirects; ignores proxy environment variables.
+- chat_json(messages, timeout) -> dict: POST /v1/chat/completions with response_format json_object, parses the first
+  choice's message content as JSON. Errors: LlmUnavailable (connection refused, HTTP error), LlmTimeout,
+  LlmInvalidResponse (not JSON).
+Acceptance: tests against a local http.server fixture on 127.0.0.1 (success, 500, redirect refused, invalid JSON,
+timeout) and refusal of non-loopback hosts.
+"""
+
+[[task]]
+id = "CORE-04"
+title = "extractor: template + snapshot -> extracted evidence"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/extractor.py", "tests/test_extractor.py"]
+depends_on = ["CORE-01", "CORE-02", "CORE-03"]
+body = """
+Implement src/privasheet/extractor.py per spec sections 5.3 and D5.
+- build_messages(template, snapshot): system instructions (OCR text is untrusted data; never guess; report missing
+  or uncertain with a reason; return only box ids and spans), the template fields and tables with each description
+  as the user's instruction and hints, and prompt_lines from layout.
+- extract(template, snapshot, client, deadline) -> extracted: calls client.chat_json, validates with evidence; on
+  invalid response one corrected retry that includes the errors; after two failures raise ExtractionFailed
+  (LLM_INVALID_RESPONSE). Respects the remaining time budget.
+Acceptance: tests with a fake client (valid, invalid then valid, invalid twice, uncertain fields, multi-page table).
+"""
+
+[[task]]
+id = "CORE-05"
+title = "template_builder: AI proposal for a new template"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/template_builder.py", "tests/test_template_builder.py"]
+depends_on = ["CORE-01", "CORE-02", "CORE-03"]
+body = """
+Implement src/privasheet/template_builder.py per spec section 5.1 (steps 3-5).
+- propose(draft_fields, snapshot, client) -> proposal in the builder response shape (value and label evidence per
+  field, header/end evidence per table; value may be missing or uncertain with reason). Same retry rule as extractor.
+- derive_hints(snapshot, confirmed) -> hints (labels from label span, region from the centre of the first value box,
+  example from the value span) and a complete template doc ready for templates.ensure_valid.
+Acceptance: tests with a fake client, including uncertain values that must stay unassigned.
+"""
+
+[[task]]
+id = "WEB-01"
+title = "web: FastAPI app shell, security and layout"
+tier = "green"
+review = "joint"
+paths = ["src/privasheet/web/__init__.py", "src/privasheet/web/app.py", "src/privasheet/web/settings.py", "src/privasheet/web/templates/**", "src/privasheet/web/static/app/**", "tests/test_web_app.py", "tests/js/**"]
+body = """
+Create the web shell per approved spec sections 8 (Web UI, Configuration) and 9.
+- settings.py: load .env (simple KEY=VALUE parser, environment overrides) for PRIVASHEET_HOST, PORT, ALLOWED_HOSTS,
+  DATA_DIR (default temp/ next to the installation), BASE_URL, MODEL, DOCUMENT_TIMEOUT_S.
+- app.py: create_app(settings) with Host allowlist check (403), Origin check on state-changing requests (403),
+  security headers (CSP default-src 'self'; no inline scripts; frame-ancestors 'none'; nosniff), static files.
+- Jinja2 base layout with Bootstrap 5 navbar for the five screens (Templates, New template, Scan batch, Review, Export),
+  dark mode toggle using data-bs-theme (remembered in localStorage), and placeholder pages.
+- static/app/react-setup.js: exposes html = htm.bind(React.createElement); static/app/confirm.js: a Bootstrap modal
+  confirm(message) -> Promise<boolean> used by every delete action.
+Acceptance: Python tests with FastAPI TestClient (pages render, vendor assets served, Host/Origin checks, headers).
+"""
+
+[[task]]
+id = "WEB-02"
+title = "web: hashtag field editor component"
+tier = "green"
+review = "joint"
+paths = ["src/privasheet/web/static/app/field-editor.js", "src/privasheet/web/static/app/field-editor-logic.mjs", "src/privasheet/web/templates/new_template.html", "src/privasheet/web/app.py", "tests/test_web_field_editor.py", "tests/js/field-editor.test.mjs"]
+depends_on = ["WEB-01", "FIX-01"]
+body = """
+Build the "add fields one at a time" editor of spec 5.1 step 2 as a React component (htm, no JSX).
+- GET /api/presets returns presets from privasheet.presets; POST /api/templates/validate returns templates errors.
+- Typing "#" suggests presets (keyboard and mouse); picking one fills key, type, description (editable) and columns
+  for tables; "#required" toggles required. Add, edit, reorder and remove fields and tables; show validation errors
+  next to the right field.
+- Pure logic (suggestion filtering, applying a preset, building the template draft) lives in field-editor-logic.mjs
+  and is tested with node --test.
+Acceptance: node tests for the logic; Python tests for both endpoints and that the page loads the component.
+"""
+
+[[task]]
+id = "WEB-03"
+title = "web: OCR box overlay component"
+tier = "green"
+review = "joint"
+paths = ["src/privasheet/web/static/app/box-overlay.js", "src/privasheet/web/static/app/box-overlay-logic.mjs", "src/privasheet/web/templates/overlay_demo.html", "src/privasheet/web/app.py", "tests/test_web_overlay.py", "tests/js/box-overlay.test.mjs"]
+depends_on = ["WEB-01"]
+body = """
+Build the SVG overlay of spec 5.1 step 4 and the review screen: a page image with every OCR box drawn from normalized
+quads; hover shows the box text (as text, never HTML); click selects a box and assigns it to the active field;
+assigned boxes are coloured per field; highlighted boxes for a result; optional span narrowing input that is checked
+with the same grounding rule as evidence.ground. Page switcher for multi-page documents.
+- Pure logic (quad to SVG points, colour assignment, span grounding in JS) in box-overlay-logic.mjs with node tests.
+- A demo page /demo/overlay using a synthetic snapshot fixture (no real data).
+"""
+
+[[task]]
+id = "WEB-04"
+title = "web: review editor component"
+tier = "green"
+review = "joint"
+paths = ["src/privasheet/web/static/app/review-editor.js", "src/privasheet/web/static/app/review-editor-logic.mjs", "src/privasheet/web/templates/review_demo.html", "src/privasheet/web/app.py", "tests/test_web_review.py", "tests/js/review-editor.test.mjs"]
+depends_on = ["WEB-03", "FIX-02"]
+body = """
+Build the review editor of spec 4.3 (Review) and 9 as a React component, working against a JSON contract (the
+pipeline endpoints come later): shows the issue list with reasons (AI_UNCERTAIN suggests refining the field prompt;
+DUPLICATE_DOCUMENT links to the earlier document), editable values in canonical form (date input, plain decimals),
+add/remove table rows for every table, Save, Mark reviewed, Mark rejected, Edit for finished documents, Delete with the
+confirm modal. Uses box-overlay for the page image.
+- Pure logic (dirty tracking, canonical value checks, acknowledgement list, which buttons are enabled per status) in
+  review-editor-logic.mjs with node tests.
+- Demo page /demo/review with a synthetic result fixture.
+"""
+
+[[task]]
+id = "WEB-05"
+title = "web: export selection component"
+tier = "green"
+review = "joint"
+paths = ["src/privasheet/web/static/app/export-select.js", "src/privasheet/web/static/app/export-select-logic.mjs", "src/privasheet/web/templates/export_demo.html", "src/privasheet/web/app.py", "tests/test_web_export.py", "tests/js/export-select.test.mjs"]
+depends_on = ["WEB-01", "FIX-03"]
+body = """
+Build the export screen of spec 4.5 and 9 as a React component: table of documents with a checkbox each, Select all
+(selects only passed or reviewed documents; others shown disabled with their status), selected count, Download button
+disabled when nothing is selected.
+- Pure logic (selectable rule, select all, toggle) in export-select-logic.mjs with node tests.
+- Demo page /demo/export with a synthetic manifest fixture; POST /api/demo/export builds JSONL with
+  export.build_jsonl for the fixture and returns it as a download.
+"""
