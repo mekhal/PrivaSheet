@@ -10,8 +10,8 @@ from privasheet.templates import (
     field_keys,
     key_labels,
     table,
-    validate_template,
     valid_version_label,
+    validate_template,
     version_label,
 )
 
@@ -206,7 +206,32 @@ def test_arithmetic_keys_are_not_reserved(doc, key):
     assert validate_template(doc) == []
 
 
+def test_reserved_decimal_keys(doc):
+    for key in ("subtotal", "discount", "shipping", "tax", "total"):
+        doc["fields"] = [field for field in doc["fields"] if field["key"] != key]
+        doc["fields"].append(
+            {
+                "key": key,
+                "type": "text",
+                "description": f"Free text value for {key}.",
+            }
+        )
+    doc["tables"][0]["columns"] = [
+        {"key": "qty", "type": "text"},
+        {"key": "unit_price", "type": "text"},
+        {"key": "amount", "type": "text"},
+    ]
+    assert validate_template(doc) == []
+
+
 def test_several_tables_allowed(doc):
+    other = deepcopy(doc["tables"][0])
+    other["key"] = "other"
+    doc["tables"].append(other)
+    assert validate_template(doc) == []
+
+
+def test_at_most_one_table(doc):
     other = deepcopy(doc["tables"][0])
     other["key"] = "other"
     doc["tables"].append(other)
@@ -217,6 +242,12 @@ def test_several_tables_allowed(doc):
 def test_tolerance_is_not_a_template_rule(doc, value):
     doc["rules"]["tolerance"] = value
     assert validate_template(doc) == []
+
+
+def test_tolerance(doc):
+    for value in (None, "", "bad", -1, 0, 0.01, "0.01"):
+        doc["rules"]["tolerance"] = value
+        assert validate_template(doc) == []
 
 
 @pytest.mark.parametrize(

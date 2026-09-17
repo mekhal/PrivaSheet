@@ -3,7 +3,6 @@
 from privasheet.presets import PRESETS, REQUIRED_FLAG, search_presets
 from privasheet.templates import validate_template
 
-
 EXPECTED_TAGS = {
     "#vendor_name",
     "#vendor_address",

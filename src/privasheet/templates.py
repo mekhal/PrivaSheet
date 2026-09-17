@@ -2,7 +2,7 @@
 
 import re
 from copy import deepcopy
-from datetime import date, datetime
+from datetime import date
 
 _KEY = re.compile(r"[a-z][a-z0-9_]{0,39}")
 _DATE_FORMAT = re.compile(r"(?:YYYY|MMM|DD|MM|YY|[^\w])+")
@@ -163,7 +163,9 @@ def valid_version_label(label: str) -> bool:
     if not match:
         return False
     try:
-        datetime.strptime(match.group(2), "%Y%m%d")
+        date.fromisoformat(
+            f"{match.group(2)[:4]}-{match.group(2)[4:6]}-{match.group(2)[6:]}"
+        )
     except ValueError:
         return False
     return True
