@@ -4,13 +4,16 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from privasheet.templates import key_labels
-from privasheet.validate.arithmetic import check_arithmetic
 from privasheet.validate.parse import (
     is_canonical_date,
     is_canonical_decimal,
     parse_date,
     parse_decimal,
 )
+
+AI_UNCERTAIN = "AI_UNCERTAIN"
+DUPLICATE_DOCUMENT = "DUPLICATE_DOCUMENT"
+PROCESSING_TIMEOUT = "PROCESSING_TIMEOUT"
 
 
 @dataclass
@@ -88,6 +91,7 @@ def check_extraction(
     boxes = {box["id"]: box for page in snapshot["pages"] for box in page["boxes"]}
     labels = [_normalize(label) for label in key_labels(template)]
     texts = [_normalize(box["text"]) for box in boxes.values()]
+    min_key_label_ratio = template.get("match", {}).get("min_key_label_ratio", 0.9)
     found = sum(
         any(
             label in text or SequenceMatcher(None, label, text).ratio() >= 0.8
@@ -95,13 +99,13 @@ def check_extraction(
         )
         for label in labels
     )
-    if labels and found / len(labels) < template["match"]["min_key_label_ratio"]:
+    if labels and found / len(labels) < min_key_label_ratio:
         issues.append(
             Issue(
                 "TEMPLATE_MISMATCH",
                 "template",
                 f"Found {found} of {len(labels)} key labels; "
-                f"required ratio is {template['match']['min_key_label_ratio']}. "
+                f"required ratio is {min_key_label_ratio}. "
                 "Consider creating a new template.",
             )
         )
@@ -109,6 +113,16 @@ def check_extraction(
     used = {}
 
     def check_value(definition, evidence, target, required):
+        if evidence is not None and evidence.get("uncertain") is True:
+            issues.append(
+                Issue(
+                    AI_UNCERTAIN,
+                    target,
+                    evidence.get("reason") or "AI marked this value as uncertain.",
+                )
+            )
+            return None
+
         if evidence is None or evidence.get("missing") is True:
             if required:
                 issues.append(
@@ -127,12 +141,12 @@ def check_extraction(
                         f"Box {box_id} with the same span is also used by {previous}.",
                     )
                 )
-            if boxes[box_id]["score"] < 0.80:
+            if boxes[box_id]["score"] < 0.90:
                 issues.append(
                     Issue(
                         "LOW_OCR_SCORE",
                         target,
-                        f"Box {box_id} has OCR score {boxes[box_id]['score']} below 0.80.",
+                        f"Box {box_id} has OCR score {boxes[box_id]['score']} below 0.90.",
                     )
                 )
 
@@ -154,17 +168,6 @@ def check_extraction(
         return value
 
     values = _values(template, extracted, check_value, issues)
-    issues.extend(
-        check_arithmetic(
-            template,
-            values,
-            {
-                issue.target
-                for issue in issues
-                if issue.code in {"PARSE_ERROR", "UNGROUNDED_VALUE"}
-            },
-        )
-    )
     return values, issues
 
 
@@ -192,12 +195,5 @@ def check_review(template: dict, review: dict) -> list[Issue]:
             )
         return value
 
-    values = _values(template, review, check_value, issues)
-    issues.extend(
-        check_arithmetic(
-            template,
-            values,
-            {issue.target for issue in issues if issue.code == "PARSE_ERROR"},
-        )
-    )
+    _values(template, review, check_value, issues)
     return issues

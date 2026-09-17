@@ -5,7 +5,13 @@ from dataclasses import asdict
 
 import pytest
 
-from privasheet.validate.checks import Issue, check_extraction, check_review
+from privasheet.validate.checks import (
+    DUPLICATE_DOCUMENT,
+    Issue,
+    PROCESSING_TIMEOUT,
+    check_extraction,
+    check_review,
+)
 
 
 @pytest.fixture
@@ -128,6 +134,11 @@ def test_issue_is_dataclass():
     }
 
 
+def test_pipeline_issue_codes_are_constants():
+    assert DUPLICATE_DOCUMENT == "DUPLICATE_DOCUMENT"
+    assert PROCESSING_TIMEOUT == "PROCESSING_TIMEOUT"
+
+
 def test_canonical_values_and_purity(documents):
     template, snapshot, extracted, review = documents
     before = deepcopy(documents)
@@ -213,9 +224,7 @@ def test_ungrounded_is_not_missing_or_parse_error(documents):
     }
 
 
-@pytest.mark.parametrize(
-    "score,expected", [(0.7999, True), (0.80, False), (0.99, False)]
-)
+@pytest.mark.parametrize("score,expected", [(0.8999, True), (0.90, False)])
 def test_ocr_score_all_cited_boxes_all_pages(documents, score, expected):
     template, snapshot, extracted, _ = documents
     snapshot["pages"].append(
@@ -241,6 +250,27 @@ def test_ocr_score_all_cited_boxes_all_pages(documents, score, expected):
     assert pairs(issues) == (
         {("LOW_OCR_SCORE", "line_items[0].qty")} if expected else set()
     )
+
+
+def test_uncertain_evidence_reports_reason_and_null_value(documents):
+    template, snapshot, extracted, _ = documents
+    extracted["fields"]["total"] = {
+        "uncertain": True,
+        "reason": "total label overlaps a stamp",
+    }
+    extracted["tables"]["line_items"][0]["qty"] = {
+        "uncertain": True,
+        "reason": "quantity is handwritten",
+    }
+
+    values, issues = check_extraction(template, snapshot, extracted)
+
+    assert values["fields"]["total"] is None
+    assert values["tables"]["line_items"][0]["qty"] is None
+    assert [(issue.code, issue.target, issue.detail) for issue in issues] == [
+        ("AI_UNCERTAIN", "total", "total label overlaps a stamp"),
+        ("AI_UNCERTAIN", "line_items[0].qty", "quantity is handwritten"),
+    ]
 
 
 @pytest.mark.parametrize("same_span", [True, False])
@@ -287,6 +317,20 @@ def test_key_label_fraction_boundary(documents, threshold, failed):
     template["match"]["min_key_label_ratio"] = threshold
     snapshot["pages"][0]["boxes"][0]["text"] = "unrelated"
     assert bool(check_extraction(template, snapshot, extracted)[1]) is failed
+
+
+@pytest.mark.parametrize("found,failed", [(2, False), (1, True)])
+def test_template_match_ratio_defaults_to_ninety_percent(documents, found, failed):
+    template, snapshot, extracted, _ = documents
+    del template["match"]
+    if found == 1:
+        snapshot["pages"][0]["boxes"][2]["text"] = "also unrelated"
+
+    issues = check_extraction(template, snapshot, extracted)[1]
+
+    assert [issue.code for issue in issues] == (
+        ["TEMPLATE_MISMATCH"] if failed else []
+    )
 
 
 @pytest.mark.parametrize(
@@ -338,6 +382,76 @@ def test_duplicate_across_rows_and_multiple_failures(documents):
         ("DUPLICATE_BOX", "line_items[2].qty"),
         ("LOW_OCR_SCORE", "line_items[2].qty"),
         ("PARSE_ERROR", "line_items[2].qty"),
+    } <= pairs(issues)
+
+
+def test_checks_follow_table_boxes_across_multiple_pages(documents):
+    template, snapshot, extracted, _ = documents
+    template["tables"].append(
+        {
+            "key": "adjustments",
+            "columns": [
+                {"key": "label", "type": "text"},
+                {"key": "amount", "type": "decimal"},
+            ],
+        }
+    )
+    snapshot["pages"].extend(
+        [
+            {
+                "page": 2,
+                "width": 100,
+                "height": 100,
+                "boxes": [
+                    {
+                        "id": "p2-b0000",
+                        "text": "credit",
+                        "score": 0.95,
+                        "quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                    }
+                ],
+            },
+            {
+                "page": 3,
+                "width": 100,
+                "height": 100,
+                "boxes": [
+                    {
+                        "id": "p3-b0000",
+                        "text": "not money",
+                        "score": 0.89,
+                        "quad": [[0, 0], [1, 0], [1, 1], [0, 1]],
+                    }
+                ],
+            },
+        ]
+    )
+    extracted["tables"]["line_items"].append(
+        {
+            "description": {"box_ids": ["p2-b0000"], "span": "credit", "raw": "credit"},
+            "qty": {"box_ids": ["p3-b0000"], "span": "not money", "raw": "not money"},
+            "due": {"missing": True},
+        }
+    )
+    extracted["tables"]["adjustments"] = [
+        {
+            "label": {"box_ids": ["p2-b0000"], "span": "credit", "raw": "credit"},
+            "amount": {
+                "box_ids": ["p3-b0000"],
+                "span": "not money",
+                "raw": "not money",
+            },
+        }
+    ]
+
+    issues = check_extraction(template, snapshot, extracted)[1]
+
+    assert {
+        ("PARSE_ERROR", "line_items[1].qty"),
+        ("LOW_OCR_SCORE", "line_items[1].qty"),
+        ("DUPLICATE_BOX", "adjustments[0].label"),
+        ("PARSE_ERROR", "adjustments[0].amount"),
+        ("LOW_OCR_SCORE", "adjustments[0].amount"),
     } <= pairs(issues)
 
 
