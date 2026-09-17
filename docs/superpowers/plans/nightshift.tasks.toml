@@ -1,0 +1,39 @@
+plan = "feasibility spike — synthetic data (agreed with maintainer 2026-09-17)"
+
+[[task]]
+id = "SPK-01"
+title = "Synthetic invoice generator + 5 demo invoices"
+tier = "green"
+review = "joint"
+paths = ["spike/**"]
+body = """
+Build a synthetic invoice generator for the feasibility spike, and generate 5 demo invoices.
+All data is fake. Never use real company names, people, addresses, tax IDs or bank details.
+
+Environment: use /home/agent/work/.venv/bin/python (Pillow is installed; there is no network, do not install packages).
+Fonts: /usr/share/fonts/truetype/dejavu/ (DejaVuSans.ttf, DejaVuSans-Bold.ttf).
+
+Deliverables:
+- spike/generator/ — a module runnable as:
+  /home/agent/work/.venv/bin/python -m spike.generator --out spike/samples/demo --count 5 --seed 42
+- Two different invoice layouts (e.g. "layout-a": header left, totals bottom right; "layout-b": header in a
+  boxed band, customer block on the right). Each invoice has: vendor name and address, customer name and address,
+  invoice number, invoice date, due date, currency, a line-item table (2-6 rows: description, qty, unit price,
+  amount), subtotal, tax (7%), total.
+- Arithmetic is exact: amount = qty x unit price; subtotal = sum of amounts; tax = subtotal x 0.07 rounded half-up
+  to 2 decimals; total = subtotal + tax. Use decimal.Decimal.
+- For each invoice write invoice-NN.png (A4 portrait at 150 DPI, white background, readable text) and
+  invoice-NN.json (ground truth, one line) with this shape:
+  {"layout": "layout-a", "fields": {"invoice_no": "...", "invoice_date": "YYYY-MM-DD", "due_date": "YYYY-MM-DD",
+   "vendor_name": "...", "customer_name": "...", "currency": "USD", "subtotal": "1200.00", "tax": "84.00",
+   "total": "1284.00"}, "tables": {"line_items": [{"description": "...", "qty": "2", "unit_price": "600.00",
+   "amount": "1200.00"}]}}
+  Dates on the image may use a human format (e.g. 17 Sep 2026); the JSON uses ISO dates and plain decimals.
+- The 5 demo invoices use both layouts.
+- Same seed produces identical JSON and identical PNG bytes.
+
+Tests (spike/tests/): arithmetic is consistent for many seeds; JSON has exactly the keys above; same seed gives the
+same output; both layouts are produced; a PNG has the expected size.
+
+Keep the whole change under 350 changed text lines (the PNGs do not count). Commit nothing; the orchestrator commits.
+"""
