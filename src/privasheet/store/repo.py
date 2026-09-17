@@ -168,8 +168,7 @@ def commit_worker_outcome(
 ) -> bool:
     """Replace a result from a worker outcome when revision and job match."""
     cursor = conn.execute(
-        "UPDATE results SET doc = ? "
-        "WHERE result_id = ? AND revision = ? AND job = ?",
+        "UPDATE results SET doc = ? WHERE result_id = ? AND revision = ? AND job = ?",
         (
             dumps(_with_next_revision(doc, expected_revision)),
             result_id,
