@@ -7,8 +7,8 @@ import pytest
 
 from privasheet.validate.checks import (
     DUPLICATE_DOCUMENT,
-    Issue,
     PROCESSING_TIMEOUT,
+    Issue,
     check_extraction,
     check_review,
 )
@@ -328,9 +328,7 @@ def test_template_match_ratio_defaults_to_ninety_percent(documents, found, faile
 
     issues = check_extraction(template, snapshot, extracted)[1]
 
-    assert [issue.code for issue in issues] == (
-        ["TEMPLATE_MISMATCH"] if failed else []
-    )
+    assert [issue.code for issue in issues] == (["TEMPLATE_MISMATCH"] if failed else [])
 
 
 @pytest.mark.parametrize(
