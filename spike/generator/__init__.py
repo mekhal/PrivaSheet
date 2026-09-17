@@ -8,6 +8,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .appearance import choose_style, degrade, printed_value
+
 SIZE = (1240, 1754)  # A4 millimetres converted to pixels at 150 DPI, rounded.
 FONT_DIR = Path("/usr/share/fonts/truetype/dejavu")
 DESCRIPTIONS = (
@@ -55,8 +57,9 @@ def make_invoice(seed, index):
     }
 
 
-def render_invoice(invoice, destination):
-    """Render only fake data on an A4 white page with embedded 150 DPI metadata."""
+def render_invoice(invoice, destination, seed=0, style="clean"):
+    """Render fake data on an A4 canvas with embedded 150 DPI metadata."""
+    style = choose_style(style, seed, 0)
     image = Image.new("RGB", SIZE, "white")
     draw = ImageDraw.Draw(image)
     fonts = {}
@@ -103,7 +106,7 @@ def render_invoice(invoice, destination):
             ("Currency", "currency"),
         )
     ):
-        text(meta_x, meta_y + offset * 39, f"{label}: {fields[key]}", 24)
+        text(meta_x, meta_y + offset * 39, f"{label}: {printed_value(fields[key], key, seed)}", 24)
 
     top = 720
     draw.rectangle((70, top, 1170, top + 58), fill=accent)
@@ -120,7 +123,7 @@ def render_invoice(invoice, destination):
             draw.rectangle((70, y, 1170, y + 70), fill="#f3f6f9")
         text(90, y + 20, row["description"], 23)
         for x, key in ((750, "qty"), (950, "unit_price"), (1150, "amount")):
-            text(x, y + 20, row[key], 23, right=True)
+            text(x, y + 20, printed_value(row[key], key, seed), 23, right=True)
         draw.line((70, y + 70, 1170, y + 70), fill="#d4dce5", width=1)
     totals_y = 1260
     for index, (label, key) in enumerate(
@@ -130,18 +133,20 @@ def render_invoice(invoice, destination):
         if key == "total":
             draw.rectangle((670, y - 8, 1170, y + 48), fill="#edf3f8")
         text(690, y, label, 25, key == "total")
-        text(1150, y, fields[key], 25, key == "total", right=True)
+        text(1150, y, printed_value(fields[key], key, seed), 25, key == "total", right=True)
     draw.line((70, 1570, 1170, 1570), fill=accent, width=2)
     text(
         70, 1600, "Generated for testing only. No payment or tax identifiers exist.", 22
     )
+    image = degrade(image, style, seed)
     image.save(destination, format="PNG", dpi=(150, 150))
 
 
-def generate(out, count, seed):
+def generate(out, count, seed, style="mixed"):
     """Write numbered PNG/JSON pairs without consulting time or external data."""
     if count < 1:
         raise ValueError("count must be positive")
+    choose_style(style, seed, 0)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     for index in range(count):
@@ -150,4 +155,5 @@ def generate(out, count, seed):
         stem.with_suffix(".json").write_text(
             json.dumps(invoice, separators=(",", ":")) + "\n", encoding="utf-8"
         )
-        render_invoice(invoice, stem.with_suffix(".png"))
+        render_invoice(invoice, stem.with_suffix(".png"),
+                       seed=f"{seed}:{index}", style=choose_style(style, seed, index))
