@@ -106,7 +106,12 @@ def render_invoice(invoice, destination, seed=0, style="clean"):
             ("Currency", "currency"),
         )
     ):
-        text(meta_x, meta_y + offset * 39, f"{label}: {printed_value(fields[key], key, seed)}", 24)
+        text(
+            meta_x,
+            meta_y + offset * 39,
+            f"{label}: {printed_value(fields[key], key, seed)}",
+            24,
+        )
 
     top = 720
     draw.rectangle((70, top, 1170, top + 58), fill=accent)
@@ -133,7 +138,14 @@ def render_invoice(invoice, destination, seed=0, style="clean"):
         if key == "total":
             draw.rectangle((670, y - 8, 1170, y + 48), fill="#edf3f8")
         text(690, y, label, 25, key == "total")
-        text(1150, y, printed_value(fields[key], key, seed), 25, key == "total", right=True)
+        text(
+            1150,
+            y,
+            printed_value(fields[key], key, seed),
+            25,
+            key == "total",
+            right=True,
+        )
     draw.line((70, 1570, 1170, 1570), fill=accent, width=2)
     text(
         70, 1600, "Generated for testing only. No payment or tax identifiers exist.", 22
@@ -155,5 +167,9 @@ def generate(out, count, seed, style="mixed"):
         stem.with_suffix(".json").write_text(
             json.dumps(invoice, separators=(",", ":")) + "\n", encoding="utf-8"
         )
-        render_invoice(invoice, stem.with_suffix(".png"),
-                       seed=f"{seed}:{index}", style=choose_style(style, seed, index))
+        render_invoice(
+            invoice,
+            stem.with_suffix(".png"),
+            seed=f"{seed}:{index}",
+            style=choose_style(style, seed, index),
+        )
