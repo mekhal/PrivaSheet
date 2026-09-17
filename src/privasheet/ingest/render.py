@@ -11,7 +11,9 @@ from PIL import Image, ImageOps
 from privasheet.ingest.checks import IngestError, Kind, Limits, inspect
 
 
-def render_pages(path: str | Path, kind: Kind | str, limits: Limits) -> list[Image.Image]:
+def render_pages(
+    path: str | Path, kind: Kind | str, limits: Limits
+) -> list[Image.Image]:
     """Render or decode an upload into RGB page images."""
 
     page_infos = inspect(path, kind, limits)

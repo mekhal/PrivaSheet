@@ -1,7 +1,5 @@
 """Page rendering and canonical image bytes."""
 
-from io import BytesIO
-
 import pytest
 from PIL import Image, ImageChops
 
@@ -28,10 +26,11 @@ def assert_error_code(code, fn, *args):
 
 def test_render_jpeg_applies_exif_orientation_and_returns_rgb(tmp_path):
     path = tmp_path / "rotated.jpg"
-    image = Image.new("RGB", (3, 2), "black")
-    image.putpixel((0, 0), (255, 0, 0))
-    image.putpixel((1, 0), (0, 255, 0))
-    image.putpixel((2, 0), (0, 0, 255))
+    image = Image.new("RGB", (30, 20), "black")
+    for x, color in enumerate(((255, 0, 0), (0, 255, 0), (0, 0, 255))):
+        for px in range(x * 10, (x + 1) * 10):
+            for py in range(20):
+                image.putpixel((px, py), color)
     exif = Image.Exif()
     exif[274] = 6
     image.save(path, format="JPEG", quality=100, exif=exif)
@@ -39,10 +38,10 @@ def test_render_jpeg_applies_exif_orientation_and_returns_rgb(tmp_path):
     (page,) = render_pages(path, "jpeg", Limits())
 
     assert page.mode == "RGB"
-    assert page.size == (2, 3)
-    assert page.getpixel((1, 0))[0] > 200
-    assert page.getpixel((1, 1))[1] > 200
-    assert page.getpixel((1, 2))[2] > 200
+    assert page.size == (20, 30)
+    assert page.getpixel((10, 5))[0] > 200
+    assert page.getpixel((10, 15))[1] > 200
+    assert page.getpixel((10, 25))[2] > 200
 
 
 def test_render_tiff_reads_every_frame_as_rgb(tmp_path):
@@ -72,6 +71,7 @@ def test_render_pdf_page_size_matches_dpi(tmp_path):
 @pytest.mark.parametrize(
     ("filename", "kind", "make"),
     [
+        ("doc.jpg", "jpeg", lambda path: Image.new("RGB", (11, 10)).save(path)),
         ("doc.png", "png", lambda path: Image.new("RGB", (11, 10)).save(path)),
         ("doc.tiff", "tiff", lambda path: Image.new("RGB", (11, 10)).save(path)),
         ("doc.pdf", "pdf", lambda path: save_pdf(path, [(11, 10)])),
