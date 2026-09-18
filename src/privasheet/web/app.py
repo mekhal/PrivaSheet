@@ -14,6 +14,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.responses import PlainTextResponse
 
 from privasheet.export import ExportNotAllowed, build_jsonl, export_filename
+from privasheet.presets import REQUIRED_FLAG, search_presets
+from privasheet.templates import validate_template
 from privasheet.web.settings import Settings, load_settings
 
 STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -341,6 +343,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/templates/new", response_class=HTMLResponse)
     async def new_template_page(request: Request) -> HTMLResponse:
         return render(request, "new_template.html", "New template")
+
+    @app.get("/api/presets")
+    async def presets_api() -> JSONResponse:
+        return JSONResponse(
+            {
+                "presets": [
+                    *search_presets("#"),
+                    {"tag": REQUIRED_FLAG, "kind": "flag"},
+                ]
+            }
+        )
+
+    @app.post("/api/templates/validate")
+    async def validate_template_api(request: Request) -> JSONResponse:
+        payload = await request.json()
+        return JSONResponse({"errors": validate_template(payload)})
 
     @app.post("/templates/delete")
     async def delete_template() -> RedirectResponse:
