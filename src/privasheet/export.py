@@ -91,7 +91,7 @@ def selectable_documents(manifest: dict, results: dict[str, dict]) -> list[str]:
     return [
         document["document_id"]
         for document in manifest["documents"]
-        if results[document["result_id"]]["status"] in EXPORTABLE_STATUSES
+        if results.get(document["result_id"], {}).get("status") in EXPORTABLE_STATUSES
     ]
 
 
