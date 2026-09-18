@@ -513,7 +513,12 @@ id = "WEB-04"
 title = "web: review editor component"
 tier = "green"
 review = "joint"
-paths = ["src/privasheet/web/static/app/review-editor.js", "src/privasheet/web/static/app/review-editor-logic.mjs", "src/privasheet/web/templates/review_demo.html", "src/privasheet/web/app.py", "tests/test_web_review.py", "tests/js/review-editor.test.mjs"]
+paths = ["src/privasheet/web/static/app/review-editor.js",
+         "src/privasheet/web/static/app/review-editor-logic.mjs",
+         "src/privasheet/web/templates/review_demo.html",
+         "src/privasheet/web/templates/review.html",
+         "src/privasheet/web/app.py",
+         "tests/test_web_review.py", "tests/js/review-editor.test.mjs"]
 depends_on = ["WEB-03", "FIX-02"]
 body = """
 Build the review editor of spec 4.3 (Review) and 9 as a React component, working against a JSON contract (the
@@ -524,6 +529,9 @@ confirm modal. Uses box-overlay for the page image.
 - Pure logic (dirty tracking, canonical value checks, acknowledgement list, which buttons are enabled per status) in
   review-editor-logic.mjs with node tests.
 - Demo page /demo/review with a synthetic result fixture.
+- The real review screen is part of this task, not a later one: put the editor into
+  src/privasheet/web/templates/review.html, which is in the allowed paths for exactly that.
+  WEB-03 has already wired the box overlay into that template; build on it, do not replace it.
 """
 
 [[task]]
