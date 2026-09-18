@@ -489,7 +489,12 @@ id = "WEB-03"
 title = "web: OCR box overlay component"
 tier = "green"
 review = "joint"
-paths = ["src/privasheet/web/static/app/box-overlay.js", "src/privasheet/web/static/app/box-overlay-logic.mjs", "src/privasheet/web/templates/overlay_demo.html", "src/privasheet/web/app.py", "tests/test_web_overlay.py", "tests/js/box-overlay.test.mjs"]
+paths = ["src/privasheet/web/static/app/box-overlay.js",
+         "src/privasheet/web/static/app/box-overlay-logic.mjs",
+         "src/privasheet/web/templates/overlay_demo.html",
+         "src/privasheet/web/templates/review.html",
+         "src/privasheet/web/app.py",
+         "tests/test_web_overlay.py", "tests/js/box-overlay.test.mjs"]
 depends_on = ["WEB-01"]
 body = """
 Build the SVG overlay of spec 5.1 step 4 and the review screen: a page image with every OCR box drawn from normalized
@@ -498,6 +503,9 @@ assigned boxes are coloured per field; highlighted boxes for a result; optional 
 with the same grounding rule as evidence.ground. Page switcher for multi-page documents.
 - Pure logic (quad to SVG points, colour assignment, span grounding in JS) in box-overlay-logic.mjs with node tests.
 - A demo page /demo/overlay using a synthetic snapshot fixture (no real data).
+- The review screen is part of this task, not a later one: wire the overlay into
+  src/privasheet/web/templates/review.html, which is in the allowed paths for exactly that.
+  Attempt 1 did this and was rejected only because the path was missing from the task.
 """
 
 [[task]]
