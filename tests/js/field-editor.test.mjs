@@ -3,8 +3,12 @@ import test from "node:test";
 
 import {
   applyPreset,
+  blankColumn,
+  blankField,
+  blankTable,
   buildTemplateDraft,
   filterPresetSuggestions,
+  validationErrorsByPath,
 } from "../../src/privasheet/web/static/app/field-editor-logic.mjs";
 
 const presets = [
@@ -43,6 +47,13 @@ test("applying presets fills editable state", () => {
   assert.equal(applyPreset({ required: true }, presets[2]).required, false);
 });
 
+test("new fields and columns are optional until required is chosen", () => {
+  assert.equal(blankField().required, false);
+  assert.equal(blankColumn().required, false);
+  assert.equal(blankTable().required, false);
+  assert.equal(applyPreset(blankField(), presets[2]).required, true);
+});
+
 test("template draft includes chosen field and column date formats", () => {
   const draft = buildTemplateDraft({
     fields: [
@@ -67,4 +78,30 @@ test("template draft includes chosen field and column date formats", () => {
 
   assert.equal(draft.fields[0].format, "YYYY-MM-DD");
   assert.equal(draft.tables[0].columns[0].format, "DD MMM YY");
+});
+
+test("template draft includes hint labels for key label fields", () => {
+  const draft = buildTemplateDraft({
+    fields: [
+      {
+        key: "customer",
+        type: "text",
+        required: false,
+        key_label: true,
+        hint_label: "Customer Name",
+      },
+    ],
+  });
+
+  assert.deepEqual(draft.fields[0].hint, { labels: ["Customer Name"] });
+});
+
+test("validation errors group field-level key label messages", () => {
+  const groups = validationErrorsByPath([
+    "fields[0] key label requires a non-empty first hint label",
+  ]);
+
+  assert.deepEqual(groups["fields[0]"], [
+    "fields[0] key label requires a non-empty first hint label",
+  ]);
 });

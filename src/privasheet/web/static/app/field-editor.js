@@ -194,6 +194,19 @@ import {
             <span className="form-check-label">Key label</span>
           </label>
         </div>
+        ${field.key_label === true
+          ? html`
+              <div className="col-md-4">
+                <label className="form-label">First hint label</label>
+                <input
+                  className="form-control"
+                  value=${field.hint_label || ""}
+                  onInput=${(event) => update({ hint_label: event.target.value })}
+                />
+                ${errors.hintLabel}
+              </div>
+            `
+          : null}
         <div className="col-12">
           <label className="form-label">Description</label>
           <input
@@ -367,6 +380,10 @@ import {
       key: errorsFor(errorGroups, `fields[${index}].key`),
       type: errorsFor(errorGroups, `fields[${index}].type`),
       format: errorsFor(errorGroups, `fields[${index}].format`),
+      hintLabel: html`${errorsFor(errorGroups, `fields[${index}]`)}${errorsFor(
+        errorGroups,
+        `fields[${index}].hint.labels`,
+      )}`,
       description: errorsFor(errorGroups, `fields[${index}].description`),
     });
     const columnErrors = (tableIndex, columnIndex) => ({
