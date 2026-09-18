@@ -120,6 +120,10 @@ def test_validate_response_requires_template_keys(document, mutate, expected):
             "fields.invoice_no.span must be a string",
         ),
         (
+            {"box_ids": ["p1-b0000"], "span": ""},
+            "fields.invoice_no.span must be non-empty",
+        ),
+        (
             {"box_ids": ["p1-b0000"], "span": "INV-0042", "raw": "INV-0042"},
             "fields.invoice_no.raw is not allowed",
         ),
