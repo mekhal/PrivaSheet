@@ -59,6 +59,19 @@ def test_render_tiff_reads_every_frame_as_rgb(tmp_path):
     assert [page.size for page in pages] == [(3, 5), (7, 11), (13, 17)]
 
 
+def test_render_tiff_allows_more_than_previous_page_limit(tmp_path):
+    path = tmp_path / "many-pages.tiff"
+    frames = [Image.new("RGB", (3 + index, 5 + index), "white") for index in range(11)]
+    frames[0].save(path, format="TIFF", save_all=True, append_images=frames[1:])
+
+    pages = render_pages(path, "tiff", Limits())
+
+    assert len(pages) == 11
+    assert [page.size for page in pages] == [
+        (3 + index, 5 + index) for index in range(11)
+    ]
+
+
 def test_render_pdf_page_size_matches_dpi(tmp_path):
     path = save_pdf(tmp_path / "doc.pdf", [(72, 144)])
 
