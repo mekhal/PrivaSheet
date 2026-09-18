@@ -13,4 +13,6 @@ const reactSetupSource = readFileSync(
 assert.match(confirmSource, /Promise<boolean>/);
 assert.match(confirmSource, /bootstrap\.Modal/);
 assert.match(confirmSource, /data-delete-action/);
+assert.match(confirmSource, /window\.confirmDialog/);
+assert.doesNotMatch(confirmSource, /window\.confirm\s*=/);
 assert.match(reactSetupSource, /htm\.bind\(React\.createElement\)/);

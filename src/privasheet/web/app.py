@@ -14,6 +14,7 @@ from starlette.responses import PlainTextResponse
 from privasheet.web.settings import Settings, load_settings
 
 STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+DEFAULT_PORTS = {"http": 80, "https": 443}
 SECURITY_HEADERS = {
     "content-security-policy": (
         "default-src 'self'; script-src 'self'; style-src 'self'; "
@@ -34,9 +35,12 @@ def _strip_port(host: str) -> str:
     return host.split(":", 1)[0]
 
 
-def _origin_host(origin: str) -> str:
+def _origin_tuple(origin: str) -> tuple[str, str, int | None] | None:
     parsed = urlparse(origin)
-    return parsed.hostname or ""
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    port = parsed.port or DEFAULT_PORTS.get(parsed.scheme)
+    return (parsed.scheme, parsed.hostname, port)
 
 
 def _with_security_headers(response):
@@ -64,7 +68,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         if request.method in STATE_CHANGING_METHODS:
             origin = request.headers.get("origin")
-            if origin and _origin_host(origin) not in allowed_hosts:
+            if origin and _origin_tuple(origin) != _origin_tuple(settings.base_url):
                 return _with_security_headers(
                     PlainTextResponse("Origin not allowed", status_code=403)
                 )
