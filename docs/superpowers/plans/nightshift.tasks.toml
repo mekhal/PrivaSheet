@@ -481,7 +481,13 @@ Build the "add fields one at a time" editor of spec 5.1 step 2 as a React compon
   next to the right field.
 - Pure logic (suggestion filtering, applying a preset, building the template draft) lives in field-editor-logic.mjs
   and is tested with node --test.
-Acceptance: node tests for the logic; Python tests for both endpoints and that the page loads the component.
+- Date format is part of the editor. Spec 5.1 step 2 says the user sets "the key, type, date format where
+  relevant", so a date-typed field and a date-typed table column each need a control for it. Attempt 1 was
+  rejected for leaving this out: the draft builder silently wrote DD/MM/YYYY for every date, which the user
+  could neither see nor change. Keep DD/MM/YYYY as the default, and surface the errors that validation already
+  reports against fields[i].format and tables[i].columns[j].format.
+Acceptance: node tests for the logic, including a chosen date format reaching the draft; Python tests for both
+endpoints and that the page loads the component.
 """
 
 [[task]]
@@ -532,6 +538,8 @@ confirm modal. Uses box-overlay for the page image.
 - The real review screen is part of this task, not a later one: put the editor into
   src/privasheet/web/templates/review.html, which is in the allowed paths for exactly that.
   WEB-03 has already wired the box overlay into that template; build on it, do not replace it.
+- The pipeline endpoints that would serve real review data come later, so the screen is expected to run on a
+  synthetic fixture at this stage. That is the intended result, not an unmet criterion.
 """
 
 [[task]]
