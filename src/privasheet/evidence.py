@@ -95,6 +95,11 @@ def _validate_entry(entry: object, boxes: dict[str, dict], target: str) -> list[
     return errors
 
 
+def validate_entry(entry: object, snapshot: dict, target: str = "entry") -> list[str]:
+    """Return evidence-entry shape errors for a single snapshot-grounded entry."""
+    return _validate_entry(entry, _box_map(snapshot), target)
+
+
 def validate_response(template: dict, snapshot: dict, response: object) -> list[str]:
     """Return response-shape errors for template-defined fields and tables."""
     if not isinstance(response, dict):

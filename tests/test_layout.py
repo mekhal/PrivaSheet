@@ -1,6 +1,6 @@
 """Reading-order layout helpers from design sections 3 and 5.3."""
 
-from privasheet.layout import lines, prompt_lines
+from privasheet.layout import lines, prompt_lines, region
 
 
 def box(box_id, text, left, top, right, bottom):
@@ -136,3 +136,9 @@ def test_prompt_lines_include_all_nine_regions():
         "bottom",
         "bottom-right",
     ]
+
+
+def test_region_is_public_for_a_single_box():
+    assert region(box("total", "Grand Total", 0.70, 0.70, 0.90, 0.82)) == (
+        "bottom-right"
+    )
