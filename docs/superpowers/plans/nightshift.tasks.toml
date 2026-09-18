@@ -540,6 +540,15 @@ confirm modal. Uses box-overlay for the page image.
   WEB-03 has already wired the box overlay into that template; build on it, do not replace it.
 - The pipeline endpoints that would serve real review data come later, so the screen is expected to run on a
   synthetic fixture at this stage. That is the intended result, not an unmet criterion.
+- The duplicate link has a defined target in this task, so it is no longer open to interpretation: `GET /review`
+  accepts an optional `document_id` query parameter, and a DUPLICATE_DOCUMENT issue links to
+  `/review?document_id=<the earlier document_id>`. The route still renders the synthetic fixture at this stage; only
+  the URL contract is fixed here. Build the href from the issue's `document_id` in review-editor-logic.mjs. Never
+  fall back to a bare `/review`: that is the screen the user is already on. Attempt 1 was sent to review for exactly
+  this, with the fixture advertising `document_id` "doc_passed" while linking to `/review`.
+- Acknowledgement keys must be unique per issue. `${code}:${target}` collides when two issues share a code and a
+  target, so ticking one acknowledges the other as well. Put the issue's index or id in the key and cover the
+  collision case with a node test.
 - That fixture must hold values the pipeline could actually produce, so its decimals are plain: "1284.00",
   never "1,284.00". check_extraction returns canonical values (parse_decimal strips the separators) or None
   with an issue code, so a grouped decimal cannot reach a review value. Attempt 1 put "1,284.00" in
