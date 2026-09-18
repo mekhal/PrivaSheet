@@ -116,6 +116,14 @@ def test_validate_response_requires_template_keys(document, mutate, expected):
             "fields.invoice_no.box_ids[0] does not exist in the snapshot",
         ),
         (
+            {"box_ids": [["p1-b0000"]], "span": "INV-0042"},
+            "fields.invoice_no.box_ids[0] must be a string",
+        ),
+        (
+            {"box_ids": [{"id": "p1-b0000"}], "span": "INV-0042"},
+            "fields.invoice_no.box_ids[0] must be a string",
+        ),
+        (
             {"box_ids": ["p1-b0000"], "span": 42},
             "fields.invoice_no.span must be a string",
         ),

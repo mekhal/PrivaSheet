@@ -57,6 +57,9 @@ def _validate_entry(entry: object, boxes: dict[str, dict], target: str) -> list[
             seen = set()
             duplicate = False
             for index, box_id in enumerate(box_ids):
+                if not isinstance(box_id, str):
+                    errors.append(f"{target}.box_ids[{index}] must be a string")
+                    continue
                 if box_id in seen:
                     duplicate = True
                 seen.add(box_id)
