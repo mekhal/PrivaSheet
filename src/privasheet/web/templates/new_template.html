@@ -1,3 +1,10 @@
 {% extends "base.html" %}{% block content %}
-<h1 class="h3">New template</h1><p class="text-body-secondary">Create and tune extraction templates here.</p>
+<div class="d-flex flex-column gap-3">
+  <div>
+    <h1 class="h3">New template</h1>
+    <p class="text-body-secondary mb-0">Create and tune extraction templates here.</p>
+  </div>
+  <div id="fieldEditorRoot"></div>
+</div>
+<script type="module" src="{{ url_for('static', path='/app/field-editor.js') }}"></script>
 {% endblock %}
