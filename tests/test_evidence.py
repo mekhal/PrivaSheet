@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import pytest
 
-from privasheet.evidence import apply, ground, validate_response
+from privasheet.evidence import apply, ground, validate_entry, validate_response
 
 
 @pytest.fixture
@@ -166,6 +166,16 @@ def test_validate_response_entry_rules(document, entry, expected):
     response["fields"]["invoice_no"] = entry
 
     assert expected in validate_response(template, snapshot, response)
+
+
+def test_validate_entry_is_public_for_shared_evidence_shapes(document):
+    _, snapshot, _ = document
+
+    assert validate_entry({"box_ids": ["p1-b0000"], "span": "NOPE"}, snapshot) == []
+    assert validate_entry({"uncertain": True, "reason": "faint"}, snapshot) == []
+    assert validate_entry({"box_ids": ["missing"], "span": "NOPE"}, snapshot) == [
+        "entry.box_ids[0] does not exist in the snapshot"
+    ]
 
 
 @pytest.mark.parametrize(
