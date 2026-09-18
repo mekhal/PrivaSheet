@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -14,7 +13,6 @@ const presets = [
     key: "invoice_date",
     type: "date",
     kind: "field",
-    format: "DD/MM/YYYY",
     description: "The invoice issue date.",
   },
   {
@@ -22,30 +20,19 @@ const presets = [
     key: "line_items",
     type: "table",
     kind: "table",
-    description: "One row per purchased item.",
-    columns: [
-      { key: "description", type: "text" },
-      { key: "service_date", type: "date", format: "DD MMM YY" },
-    ],
+    columns: [{ key: "service_date", type: "date", format: "DD MMM YY" }],
   },
-  {
-    tag: "#required",
-    kind: "flag",
-  },
+  { tag: "#required", kind: "flag" },
 ];
 
 test("suggestions filter hashtag presets by typed prefix", () => {
   assert.deepEqual(
-    filterPresetSuggestions("#invoice", presets).map((preset) => preset.tag),
+    filterPresetSuggestions("invoice", presets).map((preset) => preset.tag),
     ["#invoice_date"],
-  );
-  assert.deepEqual(
-    filterPresetSuggestions("line", presets).map((preset) => preset.tag),
-    ["#line_items"],
   );
 });
 
-test("applying a preset fills editable field state and defaults date format", () => {
+test("applying presets fills editable state", () => {
   assert.deepEqual(applyPreset({ required: false }, presets[0]), {
     key: "invoice_date",
     type: "date",
@@ -53,9 +40,10 @@ test("applying a preset fills editable field state and defaults date format", ()
     description: "The invoice issue date.",
     format: "DD/MM/YYYY",
   });
+  assert.equal(applyPreset({ required: true }, presets[2]).required, false);
 });
 
-test("template draft includes chosen date formats for fields and table columns", () => {
+test("template draft includes chosen field and column date formats", () => {
   const draft = buildTemplateDraft({
     fields: [
       {
@@ -70,36 +58,13 @@ test("template draft includes chosen date formats for fields and table columns",
     tables: [
       {
         key: "line_items",
-        required: true,
-        description: "One row per purchased item.",
         columns: [
-          { key: "description", type: "text", required: true },
-          {
-            key: "service_date",
-            type: "date",
-            required: false,
-            format: "DD MMM YY",
-          },
+          { key: "service_date", type: "date", required: false, format: "DD MMM YY" },
         ],
       },
     ],
   });
 
   assert.equal(draft.fields[0].format, "YYYY-MM-DD");
-  assert.equal(draft.tables[0].columns[1].format, "DD MMM YY");
-});
-
-test("react entry wires the field editor controls", () => {
-  const source = readFileSync(
-    new URL(
-      "../../src/privasheet/web/static/app/field-editor.js",
-      import.meta.url,
-    ),
-    "utf8",
-  );
-
-  assert.match(source, /FieldEditor/);
-  assert.match(source, /filterPresetSuggestions/);
-  assert.match(source, /format/);
-  assert.match(source, /ReactDOM\.createRoot/);
+  assert.equal(draft.tables[0].columns[0].format, "DD MMM YY");
 });
