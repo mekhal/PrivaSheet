@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import mimetypes
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.responses import PlainTextResponse
 
@@ -26,6 +26,54 @@ SECURITY_HEADERS = {
 }
 
 
+class LocalStaticFiles:
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory.resolve()
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            return
+
+        if scope["method"] not in {"GET", "HEAD"}:
+            await self._send_plain(send, 405, b"Method Not Allowed")
+            return
+
+        root_path = scope.get("root_path", "")
+        path = unquote(scope.get("path", ""))
+        if root_path and path.startswith(root_path):
+            path = path[len(root_path) :]
+        path = path.lstrip("/")
+        if "\x00" in path:
+            await self._send_plain(send, 404, b"Not Found")
+            return
+        file_path = (self.directory / path).resolve()
+
+        if self.directory not in file_path.parents or not file_path.is_file():
+            await self._send_plain(send, 404, b"Not Found")
+            return
+
+        body = b"" if scope["method"] == "HEAD" else file_path.read_bytes()
+        media_type = (
+            mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        )
+        headers = [
+            (b"content-type", media_type.encode("latin-1")),
+            (b"content-length", str(file_path.stat().st_size).encode("latin-1")),
+        ]
+        await send({"type": "http.response.start", "status": 200, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
+
+    async def _send_plain(self, send, status_code: int, body: bytes) -> None:
+        headers = [
+            (b"content-type", b"text/plain; charset=utf-8"),
+            (b"content-length", str(len(body)).encode("latin-1")),
+        ]
+        await send(
+            {"type": "http.response.start", "status": status_code, "headers": headers}
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
 def _strip_port(host: str) -> str:
     if not host:
         return ""
@@ -39,8 +87,16 @@ def _origin_tuple(origin: str) -> tuple[str, str, int | None] | None:
     parsed = urlparse(origin)
     if not parsed.scheme or not parsed.hostname:
         return None
-    port = parsed.port or DEFAULT_PORTS.get(parsed.scheme)
+    try:
+        port = parsed.port or DEFAULT_PORTS.get(parsed.scheme)
+    except ValueError:
+        return None
     return (parsed.scheme, parsed.hostname, port)
+
+
+def _expected_origin_tuple(request: Request) -> tuple[str, str, int | None] | None:
+    host = request.headers.get("host", "")
+    return _origin_tuple(f"{request.url.scheme}://{host}")
 
 
 def _with_security_headers(response):
@@ -55,7 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     web_dir = Path(__file__).resolve().parent
     templates = Jinja2Templates(directory=web_dir / "templates")
-    app.mount("/static", StaticFiles(directory=web_dir / "static"), name="static")
+    app.mount("/static", LocalStaticFiles(web_dir / "static"), name="static")
 
     @app.middleware("http")
     async def security_middleware(request: Request, call_next):
@@ -68,7 +124,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         if request.method in STATE_CHANGING_METHODS:
             origin = request.headers.get("origin")
-            if origin and _origin_tuple(origin) != _origin_tuple(settings.base_url):
+            if not origin or _origin_tuple(origin) != _expected_origin_tuple(request):
                 return _with_security_headers(
                     PlainTextResponse("Origin not allowed", status_code=403)
                 )

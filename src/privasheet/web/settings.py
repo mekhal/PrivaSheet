@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import os
-import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 ENV_KEYS = (
     "PRIVASHEET_HOST",
@@ -29,13 +27,9 @@ class Settings:
     model: str
     document_timeout_s: int
 
-    def model_copy(self, *, update: dict[str, Any] | None = None) -> Settings:
-        """Small compatibility helper mirroring pydantic's test-friendly API."""
-        return replace(self, **(update or {}))
-
 
 def _default_data_dir() -> Path:
-    return Path(sys.prefix) / "temp"
+    return Path(__file__).resolve().parents[2] / "temp"
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
