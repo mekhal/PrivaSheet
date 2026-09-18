@@ -13,8 +13,6 @@ class Limits:
     """Upload limits from spec section 7."""
 
     max_bytes: int = 25 * 1024 * 1024
-    max_files: int = 50
-    max_pages: int = 10
     max_megapixels: float = 40
     pdf_dpi: int = 200
 
@@ -75,25 +73,15 @@ def copy_limited(src_stream: BinaryIO, dst_path: str | Path, max_bytes: int) -> 
         raise
 
 
-def check_batch_size(n: int, limits: Limits) -> None:
-    """Validate the number of files in an upload batch."""
-
-    if n > limits.max_files:
-        raise IngestError(
-            "BATCH_TOO_LARGE",
-            f"Upload contains {n} files; limit is {limits.max_files}.",
-        )
-
-
 def inspect(path: str | Path, kind: Kind | str, limits: Limits) -> list[PageInfo]:
-    """Return lightweight page information and enforce upload page/pixel limits."""
+    """Return lightweight page information and enforce upload pixel limits."""
 
     if kind == "pdf":
         pages = _inspect_pdf(path, limits)
     elif kind in {"jpeg", "png"}:
         pages = _inspect_image(path)
     elif kind == "tiff":
-        pages = _inspect_tiff(path, limits)
+        pages = _inspect_tiff(path)
     else:
         raise IngestError("UNSUPPORTED_TYPE", f"Unsupported upload type: {kind}.")
 
@@ -118,17 +106,12 @@ def _inspect_image(path: str | Path) -> list[PageInfo]:
         raise IngestError("INSPECT_FAILED", f"Could not inspect image header: {exc}.")
 
 
-def _inspect_tiff(path: str | Path, limits: Limits) -> list[PageInfo]:
+def _inspect_tiff(path: str | Path) -> list[PageInfo]:
     from PIL import Image
 
     try:
         with Image.open(path) as image:
             frame_count = getattr(image, "n_frames", 1)
-            if frame_count > limits.max_pages:
-                raise IngestError(
-                    "PAGE_LIMIT_EXCEEDED",
-                    f"Upload has {frame_count} pages; limit is {limits.max_pages}.",
-                )
             pages = []
             for index in range(frame_count):
                 image.seek(index)
@@ -153,11 +136,6 @@ def _inspect_pdf(path: str | Path, limits: Limits) -> list[PageInfo]:
         document = pdfium.PdfDocument(str(path))
         try:
             page_count = len(document)
-            if page_count > limits.max_pages:
-                raise IngestError(
-                    "PAGE_LIMIT_EXCEEDED",
-                    f"Upload has {page_count} pages; limit is {limits.max_pages}.",
-                )
             pages = []
             for index in range(page_count):
                 page = document[index]
@@ -187,12 +165,6 @@ def _page_info(page: int, width_px: int, height_px: int) -> PageInfo:
 
 
 def _check_pages(pages: list[PageInfo], limits: Limits) -> None:
-    if len(pages) > limits.max_pages:
-        raise IngestError(
-            "PAGE_LIMIT_EXCEEDED",
-            f"Upload has {len(pages)} pages; limit is {limits.max_pages}.",
-        )
-
     max_pixels = limits.max_megapixels * 1_000_000
     for page in pages:
         if page.pixels > max_pixels:

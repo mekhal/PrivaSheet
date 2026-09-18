@@ -5,11 +5,11 @@ from io import BytesIO
 import pytest
 from PIL import Image
 
+from privasheet.ingest import checks
 from privasheet.ingest.checks import (
     IngestError,
     Limits,
     PageInfo,
-    check_batch_size,
     copy_limited,
     detect_type,
     inspect,
@@ -44,10 +44,15 @@ def assert_error_code(code, fn, *args):
 def test_limits_defaults_match_upload_table():
     limits = Limits()
     assert limits.max_bytes == 25 * 1024 * 1024
-    assert limits.max_files == 50
-    assert limits.max_pages == 10
     assert limits.max_megapixels == 40
     assert limits.pdf_dpi == 200
+
+
+def test_ingest_has_no_file_or_page_count_limit_api():
+    limits = Limits()
+    assert not hasattr(limits, "max_files")
+    assert not hasattr(limits, "max_pages")
+    assert not hasattr(checks, "check_batch_size")
 
 
 @pytest.mark.parametrize(
@@ -64,11 +69,6 @@ def test_limits_defaults_match_upload_table():
 )
 def test_detect_type_uses_signature_not_extension(header, expected):
     assert detect_type(header) == expected
-
-
-def test_check_batch_size_uses_file_limit():
-    check_batch_size(50, Limits())
-    assert_error_code("BATCH_TOO_LARGE", check_batch_size, 51, Limits())
 
 
 def test_copy_limited_streams_to_destination(tmp_path):
@@ -114,22 +114,16 @@ def test_inspect_pdf_counts_pages_and_estimates_pixels_from_dpi(tmp_path):
     ]
 
 
-def test_inspect_rejects_too_many_pages_for_pdf_and_tiff(tmp_path):
-    limits = Limits(max_pages=1)
-    assert_error_code(
-        "PAGE_LIMIT_EXCEEDED",
-        inspect,
-        save_pdf(tmp_path / "doc.pdf", [(10, 10), (10, 10)]),
-        "pdf",
-        limits,
-    )
-    assert_error_code(
-        "PAGE_LIMIT_EXCEEDED",
-        inspect,
-        save_tiff(tmp_path / "doc.tiff", [(10, 10), (10, 10)]),
-        "tiff",
-        limits,
-    )
+def test_inspect_allows_more_than_previous_page_limit_for_pdf_and_tiff(tmp_path):
+    sizes = [(10 + index, 12 + index) for index in range(11)]
+
+    pdf_pages = inspect(save_pdf(tmp_path / "doc.pdf", sizes), "pdf", Limits())
+    tiff_pages = inspect(save_tiff(tmp_path / "doc.tiff", sizes), "tiff", Limits())
+
+    assert len(pdf_pages) == 11
+    assert len(tiff_pages) == 11
+    assert [page.page for page in pdf_pages] == list(range(1, 12))
+    assert [page.page for page in tiff_pages] == list(range(1, 12))
 
 
 @pytest.mark.parametrize(
@@ -160,8 +154,24 @@ def test_inspect_translates_pillow_decompression_bomb(monkeypatch, tmp_path, kin
     assert_error_code("PIXEL_LIMIT_EXCEEDED", inspect, path, kind, Limits())
 
 
-def test_inspect_pdf_rejects_page_limit_before_opening_pages(monkeypatch, tmp_path):
+def test_inspect_pdf_reads_page_geometry_without_rendering(monkeypatch, tmp_path):
     import pypdfium2 as pdfium
+
+    sizes = [(72, 144), (36, 72)]
+
+    class FakePage:
+        def __init__(self, size):
+            self.size = size
+            self.closed = False
+
+        def get_size(self):
+            return self.size
+
+        def render(self, **_kwargs):
+            raise AssertionError("page inspection must not render PDF pages")
+
+        def close(self):
+            self.closed = True
 
     class FakePdfDocument:
         def __init__(self, _path):
@@ -170,8 +180,8 @@ def test_inspect_pdf_rejects_page_limit_before_opening_pages(monkeypatch, tmp_pa
         def __len__(self):
             return 2
 
-        def __getitem__(self, _index):
-            raise AssertionError("page objects should not be opened after limit fails")
+        def __getitem__(self, index):
+            return FakePage(sizes[index])
 
         def close(self):
             self.closed = True
@@ -180,15 +190,70 @@ def test_inspect_pdf_rejects_page_limit_before_opening_pages(monkeypatch, tmp_pa
     path = tmp_path / "doc.pdf"
     path.write_bytes(b"%PDF-1.7\n")
 
-    assert_error_code("PAGE_LIMIT_EXCEEDED", inspect, path, "pdf", Limits(max_pages=1))
+    assert inspect(path, "pdf", Limits(pdf_dpi=72)) == [
+        PageInfo(page=1, width_px=72, height_px=144, pixels=72 * 144),
+        PageInfo(page=2, width_px=36, height_px=72, pixels=36 * 72),
+    ]
 
 
-def test_inspect_tiff_rejects_page_limit_before_seeking_frames(monkeypatch, tmp_path):
+def test_inspect_pdf_reads_geometry_for_many_pages_without_rendering(
+    monkeypatch, tmp_path
+):
+    import pypdfium2 as pdfium
+
+    sizes = [(72 + index, 144 + index) for index in range(11)]
+    opened_pages = []
+
+    class FakePage:
+        def __init__(self, index):
+            self.index = index
+
+        def get_size(self):
+            return sizes[self.index]
+
+        def render(self, **_kwargs):
+            raise AssertionError("page inspection must not render PDF pages")
+
+        def close(self):
+            pass
+
+    class FakePdfDocument:
+        def __init__(self, _path):
+            pass
+
+        def __len__(self):
+            return len(sizes)
+
+        def __getitem__(self, index):
+            opened_pages.append(index)
+            return FakePage(index)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pdfium, "PdfDocument", FakePdfDocument)
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"%PDF-1.7\n")
+
+    pages = inspect(path, "pdf", Limits(pdf_dpi=72))
+
+    assert opened_pages == list(range(11))
+    assert [page.page for page in pages] == list(range(1, 12))
+    assert pages[-1] == PageInfo(page=11, width_px=82, height_px=154, pixels=82 * 154)
+
+
+def test_inspect_tiff_allows_all_frames(monkeypatch, tmp_path):
     from PIL import Image
 
     class FakeTiff:
-        n_frames = 2
-        size = (10, 10)
+        n_frames = 11
+
+        def __init__(self):
+            self.index = 0
+
+        @property
+        def size(self):
+            return (10 + self.index, 20 + self.index)
 
         def __enter__(self):
             return self
@@ -196,14 +261,90 @@ def test_inspect_tiff_rejects_page_limit_before_seeking_frames(monkeypatch, tmp_
         def __exit__(self, *_args):
             return False
 
-        def seek(self, _index):
-            raise AssertionError("TIFF frames should not be sought after limit fails")
+        def seek(self, index):
+            self.index = index
 
     monkeypatch.setattr(Image, "open", lambda _path: FakeTiff())
     path = tmp_path / "doc.tiff"
     path.write_bytes(b"II*\x00")
 
-    assert_error_code("PAGE_LIMIT_EXCEEDED", inspect, path, "tiff", Limits(max_pages=1))
+    pages = inspect(path, "tiff", Limits())
+    assert len(pages) == 11
+    assert pages[-1] == PageInfo(page=11, width_px=20, height_px=30, pixels=20 * 30)
+
+
+def test_inspect_tiff_reads_geometry_for_many_frames(monkeypatch, tmp_path):
+    from PIL import Image
+
+    sought_frames = []
+
+    class FakeTiff:
+        n_frames = 11
+
+        def __init__(self):
+            self.index = 0
+
+        @property
+        def size(self):
+            return (20 + self.index, 30 + self.index)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def seek(self, index):
+            sought_frames.append(index)
+            self.index = index
+
+    monkeypatch.setattr(Image, "open", lambda _path: FakeTiff())
+    path = tmp_path / "doc.tiff"
+    path.write_bytes(b"II*\x00")
+
+    pages = inspect(path, "tiff", Limits())
+
+    assert sought_frames == list(range(11))
+    assert [page.page for page in pages] == list(range(1, 12))
+    assert pages[-1] == PageInfo(page=11, width_px=30, height_px=40, pixels=30 * 40)
+
+
+def test_inspect_tiff_does_not_decode_frames_for_many_pages(monkeypatch, tmp_path):
+    from PIL import Image
+
+    sought_frames = []
+
+    class FakeTiff:
+        n_frames = 11
+
+        def __init__(self):
+            self.index = 0
+
+        @property
+        def size(self):
+            return (20 + self.index, 30 + self.index)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def seek(self, index):
+            sought_frames.append(index)
+            self.index = index
+
+        def load(self):
+            raise AssertionError("page inspection must not decode TIFF frames")
+
+    monkeypatch.setattr(Image, "open", lambda _path: FakeTiff())
+    path = tmp_path / "doc.tiff"
+    path.write_bytes(b"II*\x00")
+
+    pages = inspect(path, "tiff", Limits())
+
+    assert sought_frames == list(range(11))
+    assert [page.page for page in pages] == list(range(1, 12))
 
 
 def test_inspect_rejects_unknown_kind(tmp_path):
