@@ -141,12 +141,6 @@ def _check_page_pixels(page_infos, limits: Limits) -> None:
 
 
 def _check_images(images: list[Image.Image], limits: Limits) -> None:
-    if len(images) > limits.max_pages:
-        raise IngestError(
-            "PAGE_LIMIT_EXCEEDED",
-            f"Upload has {len(images)} pages; limit is {limits.max_pages}.",
-        )
-
     max_pixels = limits.max_megapixels * 1_000_000
     for index, image in enumerate(images, start=1):
         pixels = image.size[0] * image.size[1]
