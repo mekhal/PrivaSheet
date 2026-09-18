@@ -13,13 +13,10 @@ class AsgiResponse:
     def __init__(self, status_code, headers, body):
         self.status_code = status_code
         self.headers = headers
-        self.content = body
         self.text = body.decode("utf-8", errors="replace")
 
 
 class CompatibleTestClient(TestClient):
-    """Use TestClient's public API while bypassing the broken local transport."""
-
     def request(self, method, url, *, headers=None, **kwargs):
         return asyncio.run(self._asgi_request(method, url, headers=headers))
 

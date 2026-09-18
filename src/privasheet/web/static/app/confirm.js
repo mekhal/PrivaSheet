@@ -16,21 +16,20 @@
     modalElement = document.createElement("div");
     modalElement.className = "modal fade";
     modalElement.tabIndex = -1;
-    modalElement.innerHTML = [
-      '<div class="modal-dialog modal-dialog-centered">',
-      '  <div class="modal-content">',
-      '    <div class="modal-header">',
-      '      <h1 class="modal-title fs-5">Confirm action</h1>',
-      '      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>',
-      "    </div>",
-      '    <div class="modal-body"><p class="mb-0" data-confirm-message></p></div>',
-      '    <div class="modal-footer">',
-      '      <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>',
-      '      <button type="button" class="btn btn-danger" data-confirm-ok>Delete</button>',
-      "    </div>",
-      "  </div>",
-      "</div>",
-    ].join("");
+    modalElement.innerHTML = `
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h1 class="modal-title fs-5">Confirm action</h1>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body"><p class="mb-0" data-confirm-message></p></div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="button" class="btn btn-danger" data-confirm-ok>Delete</button>
+          </div>
+        </div>
+      </div>`;
     document.body.appendChild(modalElement);
     messageElement = modalElement.querySelector("[data-confirm-message]");
     okButton = modalElement.querySelector("[data-confirm-ok]");
