@@ -427,7 +427,9 @@ id = "CORE-05"
 title = "template_builder: AI proposal for a new template"
 tier = "green"
 review = "technical"
-paths = ["src/privasheet/template_builder.py", "tests/test_template_builder.py"]
+paths = ["src/privasheet/template_builder.py", "tests/test_template_builder.py",
+         "src/privasheet/evidence.py", "tests/test_evidence.py",
+         "src/privasheet/layout.py", "tests/test_layout.py"]
 depends_on = ["CORE-01", "CORE-02", "CORE-03"]
 body = """
 Implement src/privasheet/template_builder.py per spec section 5.1 (steps 3-5).
@@ -436,6 +438,13 @@ Implement src/privasheet/template_builder.py per spec section 5.1 (steps 3-5).
 - derive_hints(snapshot, confirmed) -> hints (labels from label span, region from the centre of the first value box,
   example from the value span) and a complete template doc ready for templates.ensure_valid.
 Acceptance: tests with a fake client, including uncertain values that must stay unassigned.
+
+From the review of attempt 1 (2026-09-18), two constraints:
+- validate_proposal must reject only for the reasons documented in spec section 5.3. Attempt 1 added a
+  span-grounding rejection that is not in the spec; do not add rejection rules the spec does not define.
+- Do not reach into other modules' private helpers. Attempt 1 called evidence._validate_entry and
+  layout._region. Promote what you need to a public function in that module, give it its own test, and call
+  that instead. evidence.py, layout.py and their tests are in the allowed paths for exactly this.
 """
 
 [[task]]
