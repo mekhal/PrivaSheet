@@ -212,6 +212,34 @@ def test_selected_export_uses_manifest_order_and_allows_unfinished_batch(batch):
     assert selectable_documents(manifest, results) == ["doc_01J…", "doc_2", "doc_4"]
 
 
+def test_incomplete_batch_cannot_export(batch):
+    manifest, results, template = batch
+    refused_statuses = ["rejected", "needs_review", "failed", "queued", "processing"]
+    for status in refused_statuses:
+        document = {
+            "document_id": f"doc_{status}",
+            "result_id": f"res_{status}",
+            "source_file": f"{status}.jpg",
+        }
+        manifest["documents"].append(document)
+        results[document["result_id"]] = {
+            **document,
+            "status": status,
+            "review": None,
+            "extracted": {"fields": {}, "tables": {}},
+        }
+
+    assert selectable_documents(manifest, results) == ["doc_01J…"]
+    for status in refused_statuses:
+        with pytest.raises(ExportNotAllowed, match=f"doc_{status}"):
+            build_jsonl(manifest, results, template, [f"doc_{status}"])
+
+    del results["res_processing"]
+    assert selectable_documents(manifest, results) == ["doc_01J…"]
+    with pytest.raises(ExportNotAllowed, match="doc_processing"):
+        build_jsonl(manifest, results, template, ["doc_processing"])
+
+
 @pytest.mark.parametrize(
     "status", ["rejected", "needs_review", "failed", "queued", "processing"]
 )
@@ -240,6 +268,24 @@ def test_empty_selection_and_failed_batches(batch):
     manifest["documents"] = []
     assert build_jsonl(manifest, results, template, []) == ""
     assert failed_documents(manifest, results) == []
+
+
+def test_empty_and_all_failed_batches(batch):
+    manifest, results, template = batch
+    results["res_01J…"] = {
+        **results["res_01J…"],
+        "status": "failed",
+        "review": None,
+    }
+
+    assert selectable_documents(manifest, results) == []
+    assert build_jsonl(manifest, results, template, []) == ""
+    with pytest.raises(ExportNotAllowed, match="doc_01J…"):
+        build_jsonl(manifest, results, template, ["doc_01J…"])
+
+    manifest["documents"] = []
+    assert selectable_documents(manifest, results) == []
+    assert build_jsonl(manifest, results, template, []) == ""
 
 
 def test_export_filename_uses_utc_timestamp():
