@@ -540,6 +540,16 @@ confirm modal. Uses box-overlay for the page image.
   WEB-03 has already wired the box overlay into that template; build on it, do not replace it.
 - The pipeline endpoints that would serve real review data come later, so the screen is expected to run on a
   synthetic fixture at this stage. That is the intended result, not an unmet criterion.
+- That fixture must hold values the pipeline could actually produce, so its decimals are plain: "1284.00",
+  never "1,284.00". check_extraction returns canonical values (parse_decimal strips the separators) or None
+  with an issue code, so a grouped decimal cannot reach a review value. Attempt 1 put "1,284.00" in
+  DEMO_REVIEW_DATA and in the node test contract, which opened both review screens in an error state that
+  cannot happen in production.
+- Keep a test that a grouped decimal is rejected, but set that invalid value explicitly inside the test, the
+  way the invalid date already is. Attempt 1 relied on the shared fixture being invalid, and named the test
+  that asserts it "initial draft reads canonical editable values" while asserting a non-canonical one.
+- The OCR text on the page image and in spans keeps its separators ("Total 1,284.00"): that is the raw
+  document text the overlay shows, and it is correct as it is.
 """
 
 [[task]]
