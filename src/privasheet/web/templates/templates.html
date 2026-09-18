@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="d-flex align-items-center justify-content-between gap-3 mb-4">
+    <div>
+      <h1 class="h3 mb-1">Templates</h1>
+      <p class="text-body-secondary mb-0">Manage extraction templates for repeatable document layouts.</p>
+    </div>
+    <a class="btn btn-primary" href="/templates/new">New template</a>
+  </div>
+
+  <div class="list-group">
+    <div class="list-group-item d-flex align-items-center justify-content-between gap-3">
+      <div>
+        <h2 class="h6 mb-1">Sample invoice</h2>
+        <p class="mb-0 text-body-secondary">Placeholder template record.</p>
+      </div>
+      <form method="post" action="/templates/delete" data-delete-action data-confirm-message="Delete Sample invoice?">
+        <button class="btn btn-outline-danger btn-sm" type="submit">Delete</button>
+      </form>
+    </div>
+  </div>
+{% endblock %}
