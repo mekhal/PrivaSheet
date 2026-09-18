@@ -576,3 +576,460 @@ disabled when nothing is selected.
 - Demo page /demo/export with a synthetic manifest fixture; POST /api/demo/export builds JSONL with
   export.build_jsonl for the fixture and returns it as a download.
 """
+
+# ---------------------------------------------------------------------------
+# Work set C — the OCR unit and the pipeline worker, end to end. Requested by the maintainer on 2026-09-18 (readiness
+# finding 1: "missing OCR unit and pipeline worker connecting ingest, OCR, layout, extraction, validation and
+# persistence"). Spec (approved): docs/superpowers/specs/2026-09-16-template-extraction-design.md, sections 3, 4.2-4.4,
+# 5.2, 5.4, 6, 7 and 8 (Storage). Read the sections named in each task.
+#
+# Scope: the Python units `ocr` and `pipeline` and the app start-up that runs the worker. No UI work. Readiness
+# finding 2 (UI placeholders, demo screens, human-facing workflow testing) is owned by the Human, who tests it
+# personally: nothing in this set changes templates/*.html, static/app/** or the demo routes. Review, delete and export
+# actions for the UI, the installer and the feasibility spike are not part of this set.
+#
+# Common rules for every task below:
+# - Python 3.12, package src/privasheet, tests in tests/, run with /home/agent/work/.venv/bin/python -m pytest.
+#   Installed: pillow, pypdfium2, fastapi, uvicorn, jinja2, python-multipart, httpx, pytest, ruff.
+#   NOT installed: rapidocr, onnxruntime, numpy. There is no network and no new dependency may be added
+#   (pyproject.toml is human-only). Import rapidocr and numpy lazily inside the one function that needs them, so every
+#   other module and every test works without them.
+# - The gates reject pytest.mark.skip, skipif, xfail and pytest.skip(...): write tests that always run, with fakes.
+#   The gates also reject importing socket, http.client, urllib.request, requests, httpx or aiohttp anywhere except
+#   src/privasheet/llm.py; do not use them (multiprocessing, subprocess, threading, sqlite3, os and fcntl are fine).
+# - Paths stored in the database (documents.path, snapshot pages[].image) are relative to the data directory and use
+#   forward slashes, so a data directory can be moved and the same rows work on Windows and Linux.
+# - Logs (logging module) carry codes, IDs, timings and the original file name. They never carry OCR text, extracted
+#   values or file contents, and never an exception message from document processing.
+# - Tests draw their own synthetic images with Pillow; no binary fixtures are committed and no real data is used.
+# ---------------------------------------------------------------------------
+
+[[task]]
+id = "OCR-01"
+title = "ocr: engine adapter, box normalization, snapshot id and document"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/ocr/__init__.py", "src/privasheet/ocr/engine.py", "src/privasheet/ocr/snapshot.py",
+         "tests/test_ocr_engine.py", "tests/test_ocr_snapshot.py"]
+body = """
+Implement the pure parts of the OCR unit per spec sections 3 (ocr unit), 4.2 and D5/D7. Nothing here starts a process;
+that is OCR-02.
+
+src/privasheet/ocr/engine.py
+- class OcrError(Exception) with .code (default "OCR_FAILED") and .detail. Spec section 7: a missing engine, a missing
+  model, an engine exception and a document with no boxes at all are all OCR_FAILED.
+- The engine interface (a typing.Protocol named OcrEngine): attributes name, version, config_sha256 (str) and a method
+  models() -> list[{"name": str, "sha256": str}], plus recognize(image: PIL.Image.Image) -> list[RawBox], where RawBox
+  is a small dataclass (quad_px: four (x, y) pixel points, text: str, score: float in 0..1).
+- class RapidOcrEngine implementing it on RapidOCR (D7): imports rapidocr and numpy only inside the constructor, passes
+  the page to the engine as a NumPy array (never a path or string, spec section 3), loads models from the installed
+  package or the data directory only, never downloads at runtime, and converts every engine or import failure into
+  OcrError("OCR_FAILED", ...). models() reports the SHA-256 of each model file actually loaded.
+  make_rapidocr_engine() -> RapidOcrEngine is the default factory.
+- The RapidOCR result object exposes boxes, txts and scores; keep the conversion in one small function
+  (rapidocr_result_to_raw_boxes) that takes such an object, so tests can feed it a fake with those three attributes.
+  Handle a result whose boxes are None (no text found) by returning [].
+  The real library is not installed here, so this adapter cannot be run in this task: write it defensively against
+  that documented result shape and keep everything that can be tested behind the fakes.
+
+src/privasheet/ocr/snapshot.py
+- normalize_boxes(page, width, height, raw_boxes) -> list of box dicts {"id", "text", "quad", "score"}: id is
+  "p<page>-b<4-digit index>" counting kept boxes in engine output order (spec 4.2), quad is four [x, y] pairs
+  normalized to 0..1 and clamped, text is stripped, boxes with empty text are dropped, score is a float.
+- compute_snapshot_id(page_images, engine) -> "sha256:<hex>": SHA-256 over, in this order and with an unambiguous
+  encoding (length-prefix or canonical JSON, not plain concatenation): ingest.render.canonical_page_bytes of every page,
+  the engine name and version, the models() list sorted by name, and config_sha256 (spec 4.2). Same inputs give the same
+  id; a change to any page pixel, model digest or config changes it.
+- build_snapshot(snapshot_id, engine, pages, created_at) -> dict of spec 4.2, where pages is a list of
+  {"page": n, "width": w, "height": h, "boxes": [...], "image": "pages/<hex digest>/page-<n>.png"} and <hex digest> is
+  the snapshot id without the "sha256:" prefix. The dict also carries "created_at" (the store has a generated lookup
+  column on it) and "engine" {"name", "version", "models", "config_sha256"}.
+- Raise OcrError("OCR_FAILED", ...) from build_snapshot when the document has no boxes on any page.
+
+Acceptance (tests/test_ocr_engine.py, tests/test_ocr_snapshot.py, fakes only): box ids and normalization with clamping;
+empty-text boxes dropped; two-page numbering; snapshot id is stable and sensitive to pixels, model digest and config;
+build_snapshot matches the spec 4.2 shape and a snapshot it builds is accepted by store.repo.insert_snapshot and read
+back equal; rapidocr_result_to_raw_boxes with a fake result and with boxes=None; RapidOcrEngine() raises OcrError
+OCR_FAILED when rapidocr cannot be imported (simulate by putting None in sys.modules for it inside the test, restoring it
+afterwards) and its detail says which package is missing.
+"""
+
+[[task]]
+id = "OCR-02"
+title = "ocr: isolated child process with a time budget"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/ocr/runner.py", "src/privasheet/ocr/child.py", "src/privasheet/ocr/__init__.py",
+         "tests/fake_ocr.py", "tests/test_ocr_runner.py"]
+depends_on = ["OCR-01"]
+body = """
+Implement spec section 5.4 (OCR child process) and section 7 (time budget). Rendering and OCR run in a child process
+that never opens the database and never receives a database path.
+
+src/privasheet/ocr/runner.py
+- run_ocr_job(path, kind, limits, out_dir, timeout_s, engine="privasheet.ocr.engine:make_rapidocr_engine",
+  on_progress=None, cancel=None) -> OcrJobResult. The child is started with multiprocessing's "spawn" context (works
+  the same on Windows and Linux). In the child: ingest.render.render_pages, engine construction from the dotted
+  "module:callable" string (so tests select a fake engine without monkeypatching), OCR page by page,
+  ocr.snapshot.compute_snapshot_id and normalize_boxes, and each page image written to out_dir/page-<n>.png with
+  ingest.render.save_png_atomic. The child sends small messages over a Pipe: progress (stage "render" or "ocr", page n
+  of total) and finally the result: snapshot_id, engine info, and per page {page, width, height, boxes, tmp_image}.
+- OcrJobResult dataclass carrying exactly that (tmp_image is a path inside out_dir). The parent, not this module,
+  decides whether to keep the images (PIPE-04); this module leaves out_dir for the caller to clean up.
+- Budget: timeout_s covers the whole job. When it runs out, or cancel (a threading.Event) is set, the parent kills the
+  child (terminate, then kill after a short grace period), joins it and raises OcrTimeout(stage, page, total,
+  elapsed_s), which carries the last progress seen, or OcrCancelled. No child process may be left running on any exit
+  path, including an exception in the parent.
+- Errors in the child are sent to the parent as (code, detail) with code one of OCR_FAILED (engine or model problem, or
+  no boxes at all), DOCUMENT_UNREADABLE (ingest.checks.IngestError or a decode failure while rendering); the parent
+  re-raises them as OcrError with that code. A child that dies without a message (crash, killed) is OCR_FAILED. The
+  detail never contains OCR text.
+
+tests/fake_ocr.py (helper, no test functions): make_engine() returning a fake OcrEngine whose recognize() returns fixed
+RawBox lists keyed off the page size; a second factory whose recognize() sleeps for a long time; a third that raises.
+
+Acceptance (tests/test_ocr_runner.py, real child processes with the fakes; keep every timeout short so the file runs in
+a few seconds): a PNG built with Pillow gives a result with normalized boxes, a snapshot id equal to the one computed
+in-process, and page images that exist in out_dir; a 2-page TIFF reports progress for both pages; the sleeping engine
+hits a 1 second budget and raises OcrTimeout with stage "ocr" and the child is dead afterwards; cancel stops a running
+job; the raising engine gives OcrError OCR_FAILED; a garbage file gives DOCUMENT_UNREADABLE; an engine with no boxes
+gives OCR_FAILED. Assert no leftover child via multiprocessing.active_children().
+"""
+
+[[task]]
+id = "PIPE-01"
+title = "store: worker queue operations"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/store/repo.py", "tests/test_store_queue.py"]
+body = """
+Add the store operations the worker needs, per spec sections 4.3, 4.4 and 5.4. The store holds no business rules and
+every write is one BEGIN IMMEDIATE transaction through store.db.transaction (follow the existing functions in
+src/privasheet/store/repo.py for style). All timestamps are passed in as ISO-8601 strings (the store never reads a
+clock). Add tests in the new file tests/test_store_queue.py; do not edit the existing store tests.
+
+Contract shared with later tasks: a queued result is created with revision 0 and job 1. Claiming bumps revision by 1 and
+leaves job alone. The worker commits with commit_worker_outcome(conn, result_id, claimed["revision"], claimed["job"],
+doc). A retry bumps both revision and job.
+
+- get_document(conn, document_id) -> dict | None (same shape as the existing document rows); get_batch(conn, batch_id)
+  -> manifest dict | None; list_batches(conn) -> manifests ordered by created_at then batch_id.
+- find_result_for_document(conn, document_id) -> dict | None (the result whose doc has that document_id).
+- claim_next_queued(conn, now) -> result dict | None: picks the first queued result by batch order (created_at, then
+  batch_id) and, inside a batch, manifest order (spec 4.4 "documents order is the processing order"); sets status
+  "processing" and updated_at, increments revision, returns the stored document. None when nothing is queued.
+- reset_processing_to_queued(conn, now) -> list[result_id]: startup recovery (spec 5.4); each gets status "queued" and
+  revision + 1; job is unchanged.
+- retry_result(conn, result_id, expected_revision, now) -> bool: only when revision matches and status is "failed" or
+  "needs_review" and review is null (a saved human review is never thrown away by a retry); sets status "queued",
+  clears extracted, issues and error, increments job and revision. False otherwise.
+- set_document_snapshot(conn, document_id, snapshot_id): the snapshot row must exist (the foreign key enforces it);
+  StoreError when the document does not exist.
+- referenced_file_paths(conn) -> set[str]: every documents.path that is not null plus every pages[].image of every
+  snapshot, for orphan cleanup (spec 4.4).
+- count_results_by_status(conn) -> dict[str, int].
+
+Acceptance: table-driven tests for each function; claim order across two batches and within a batch; claim returns None
+on an empty queue and never returns a result that is not queued; two consecutive claims return different results; the
+claimed document has the bumped revision and a later commit_worker_outcome with the claimed revision and job succeeds,
+while a stale revision or a bumped job returns False; reset_processing_to_queued leaves other statuses alone; retry
+refuses a reviewed result, a wrong revision and a queued or processing one; set_document_snapshot with an unknown
+snapshot raises; referenced_file_paths covers documents and snapshot images.
+"""
+
+[[task]]
+id = "PIPE-02"
+title = "pipeline: data directory, single-instance lock, start-up recovery"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/pipeline/__init__.py", "src/privasheet/pipeline/datadir.py",
+         "src/privasheet/pipeline/recovery.py", "tests/test_pipeline_datadir.py", "tests/test_pipeline_recovery.py"]
+depends_on = ["PIPE-01"]
+body = """
+Implement spec section 8 (Storage) and sections 4.4, 5.2 step 5 and 5.4 (Recovery on startup).
+
+src/privasheet/pipeline/datadir.py
+- class DataDirError(Exception); class AlreadyRunning(DataDirError).
+- class DataDir(root): properties db_path (privasheet.db), process, archive, pages, exports, lock_path
+  (privasheet.lock); prepare() creates the layout; rel(path) -> str (relative, forward slashes) and resolve(rel) ->
+  Path, and resolve refuses anything that would leave the root (absolute paths, "..", drive letters): a stored path can
+  never point outside the data directory.
+- check_location(root, environ=os.environ): refuses (DataDirError) a network path (a string starting with two
+  slashes or two backslashes, a Windows UNC path) and a path under a folder named by the OneDrive, OneDriveConsumer or
+  OneDriveCommercial environment variables (compare resolved, case-insensitive on Windows). Spec 8.
+- acquire_lock() -> lock handle usable as a context manager and with .release(): an operating-system file lock held for
+  the life of the process (spec 5.4: not "does the file exist"). Use fcntl.flock(LOCK_EX | LOCK_NB) on POSIX and
+  msvcrt.locking on Windows, chosen by sys.platform; a second holder raises AlreadyRunning. The lock is released when
+  the process dies. The Windows branch cannot be run in this environment: keep it small and say so in its docstring.
+
+src/privasheet/pipeline/recovery.py
+- recover(conn, datadir, now) -> dict of counts, run at start-up before the worker starts:
+  1. store.repo.reset_processing_to_queued (results in processing go back to queued, spec 5.4);
+  2. a file found in archive/ whose documents row still points into process/ gets its path corrected with
+     update_document_path (spec 5.2 step 5);
+  3. orphans are removed: files in process/, archive/ and pages/ that no database row references (use
+     store.repo.referenced_file_paths), including leftover temporary files from atomic writes, and empty pages/
+     subdirectories. Files and directories that ARE referenced are never touched. The exports/ directory is not touched.
+- Never follows symlinks out of the data directory, and never deletes anything outside the four managed directories.
+
+Acceptance: tests with tmp_path and a real migrated database (store.db.open_db + store.schema.migrate): layout creation;
+rel/resolve round trip and traversal refusal; UNC and OneDrive locations refused and a normal directory accepted; the
+lock refuses a second holder in the same process (open a second DataDir on the same root) and in a child process
+started with subprocess, and is free again after release and after the holder process is killed; recovery resets a
+processing result, corrects a moved file's path, removes an orphan upload, an orphan page directory and a stray .tmp,
+keeps every referenced file, and is idempotent when run twice.
+"""
+
+[[task]]
+id = "PIPE-03"
+title = "pipeline: batch intake (upload, checks, queued results)"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/pipeline/ids.py", "src/privasheet/pipeline/intake.py",
+         "tests/test_pipeline_ids.py", "tests/test_pipeline_intake.py"]
+depends_on = ["PIPE-01", "PIPE-02"]
+body = """
+Implement spec sections 4.4 (commit point, editing a batch), 5.2 steps 1-2 and 7 (upload limits). This is the Python
+API the web layer will call later; it has no HTTP code.
+
+src/privasheet/pipeline/ids.py
+- new_id(prefix) -> "bat_..." / "doc_..." / "res_...": lexicographically sortable by creation time (millisecond
+  timestamp first, then random), and strictly increasing within one process even inside the same millisecond. This is
+  required: store.repo.find_documents_by_sha256(before_document_id=...) compares document ids as strings to mean
+  "uploaded earlier".
+
+src/privasheet/pipeline/intake.py
+- Upload dataclass (source_name: str, stream: BinaryIO).
+- create_batch(conn, datadir, template_id, version, uploads, limits=Limits(), now=..., new_id=new_id) -> IntakeResult
+  and add_files(conn, datadir, batch_id, uploads, ...) -> IntakeResult; IntakeResult has accepted (document_id,
+  result_id, source_file) and rejected (source_file, code, detail) lists.
+- Each upload is streamed into process/<document_id>.<ext> with ingest.checks.copy_limited, its type is taken from the
+  file signature (detect_type, never the name; ext is pdf, jpg, png or tif), it is checked with ingest.checks.inspect,
+  its SHA-256 is computed, and the file is flushed and fsynced. A file that fails any check is reported in rejected,
+  removed from disk and creates no row and no job (spec 5.2 step 1). Intake never opens URLs and never decodes a
+  full image.
+- The template version must exist (ValueError with a clear message otherwise; a missing template is a caller bug, not
+  a rejected file).
+- All accepted files become documents rows (sha256, source_file, path relative to the data dir, snapshot_id null),
+  queued results (spec 4.3 shape: status "queued", extracted null, issues [], review null, error null, revision 0,
+  job 1, template {"id","version"}, llm {"model": None, "prompt_version": 1}) and the batch row, in ONE transaction
+  through store.repo.create_batch (create_batch) or store.repo.add_documents_to_batch (add_files). If nothing was
+  accepted, no batch is created (batch_id None). If the transaction fails, every file saved by this call is removed again.
+- The duplicate check is NOT done here: it belongs to the worker (spec 5.2 step 3).
+- remove_file(conn, datadir, batch_id, document_id): store.repo.remove_queued_document, then delete the file after the
+  commit; a processing or finished document is locked and the store error propagates unchanged.
+
+Acceptance: ids are sortable, unique across 10000 calls and increasing; a batch of three good files (PNG, JPEG, and a
+PDF made with Pillow) gives three queued results in upload order and files in process/ with matching sha256; a file with
+a PNG signature but a .pdf name is accepted as png; an oversize file (small Limits.max_bytes), a text file and a
+corrupt PNG are rejected with codes and leave no file or row; all-rejected creates no batch; a forced database failure
+(for example a duplicate document_id from a fixed new_id) removes the saved files; add_files appends in manifest order;
+remove_file removes a queued one and refuses a processing one; results are readable with store.repo.list_results.
+"""
+
+[[task]]
+id = "PIPE-04"
+title = "pipeline: process one document (duplicate check, OCR, extract, validate)"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/pipeline/process.py", "tests/test_pipeline_process.py"]
+depends_on = ["OCR-02", "PIPE-01", "PIPE-02"]
+body = """
+Implement spec sections 5.2 steps 3-4, 6 and 7 as one function that turns a claimed result into its outcome. It does
+not claim, commit or move files (that is PIPE-05); it does write the snapshot and its page images, because the snapshot
+is committed separately before the outcome (spec 5.4: "a committed snapshot always has its images").
+
+process_document(conn, datadir, result, template, *, llm_client, model, limits, timeout_s, ocr_engine=None,
+clock=time.monotonic, now=..., cancel=None) -> dict
+- result is the claimed result document (status "processing"); the return value is the complete new result document
+  (same result_id, batch_id, document_id, source_file, template, revision and job as given; status, snapshot_id,
+  extracted, issues, error, llm {"model": model, "prompt_version": 1} and updated_at set). The caller commits it.
+  ocr_engine is the dotted "module:callable" string passed on to ocr.runner.run_ocr_job (default: the RapidOCR one).
+  The time budget timeout_s runs from the start of this call to its return.
+1. Duplicate check first: store.repo.find_documents_by_sha256(conn, sha256, before_document_id=document_id). If an
+   earlier document matches, extract nothing: status "needs_review", extracted null, one issue
+   {"code": "DUPLICATE_DOCUMENT", "target": "document", "detail": <names the earlier batch and file>,
+   "document_id": <the earlier document id>} (the review screen builds its link from that document_id; use
+   validate.checks.DUPLICATE_DOCUMENT). The earlier batch comes from store.repo.find_result_for_document.
+2. Otherwise run ocr.runner.run_ocr_job on the stored file inside a temporary directory that is always removed. If a
+   snapshot with the same id already exists (store.repo.get_snapshot), keep it and discard the new output (identical
+   uploads share one snapshot, spec 4.2). Otherwise move the page images into pages/<hex digest>/page-<n>.png (write to
+   a temporary name, flush, fsync, os.replace; ingest.render.save_png_atomic does this for images, reuse it), THEN
+   insert the snapshot row (ocr.snapshot.build_snapshot + store.repo.insert_snapshot), then set_document_snapshot. OCR
+   and LLM calls never run inside a database transaction.
+3. Extract with extractor.extract(template, snapshot, llm_client, deadline) where deadline is an absolute
+   time.monotonic-style value derived from the remaining budget, then validate.checks.check_extraction. Put the
+   canonical value next to the evidence: every extracted entry that has box_ids gets "value" (spec 4.3; look at what
+   export.build_jsonl reads and keep the two consistent). issues are dataclasses.asdict(Issue) dicts. Status is "passed"
+   when there are no issues, otherwise "needs_review" (spec 6: any issue means needs_review).
+4. Failures (spec 7), all with extracted null except where noted, error {"code", "detail"} and status "failed":
+   - LlmUnavailable, including LlmTimeout that is not a budget timeout: LLM_UNAVAILABLE.
+   - extractor.ExtractionFailed or llm.LlmInvalidResponse: LLM_INVALID_RESPONSE. (chat_json raises LlmInvalidResponse
+     for a reply that is not JSON, and extractor.extract does not catch it: map it here, do not change extractor.py.)
+   - ocr.engine.OcrError: its own code (OCR_FAILED or DOCUMENT_UNREADABLE).
+   - Any other exception: the worker handles it (PIPE-05); let it propagate.
+5. Budget (spec 7): when OcrTimeout is raised, or the deadline is already spent when the LLM step would start or the
+   LLM call times out because the budget ran out, the outcome is status "needs_review" (NOT failed), extracted null,
+   error null and exactly one issue {"code": "PROCESSING_TIMEOUT", "target": "document", "detail": plain words naming
+   the stage and progress and the elapsed time}, for example "OCR did not finish within 10 minutes (page 3 of 8,
+   600 s). Enter values by hand or retry." Use validate.checks.PROCESSING_TIMEOUT. If the snapshot was already
+   committed, keep snapshot_id on the result.
+6. cancel (threading.Event) is passed to the OCR runner; OcrCancelled propagates to the caller.
+
+Acceptance (tests/test_pipeline_process.py; fake OCR engine from tests/fake_ocr.py, a fake LLM client object with a
+chat_json method, real Pillow images, a real migrated database in tmp_path): a good invoice gives passed with values in
+canonical form and the snapshot, its page image files and documents.snapshot_id in place; an LLM answer with an uncertain
+field gives needs_review with AI_UNCERTAIN; a missing required field gives REQUIRED_MISSING; an earlier document with the
+same sha256 gives the duplicate outcome with the earlier document_id and never calls OCR or the LLM (the fakes assert
+they were not called); LLM unavailable, invalid twice and not-JSON map to the right failed codes; the OCR fake that
+raises gives OCR_FAILED; the sleeping OCR fake with a 1 second budget gives the PROCESSING_TIMEOUT outcome with the
+stage in the detail; a second document with identical page pixels reuses the existing snapshot and stores no second
+one; no temporary directory is left behind; no OCR text appears in any error detail.
+"""
+
+[[task]]
+id = "PIPE-05"
+title = "pipeline: the single background worker"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/pipeline/worker.py", "tests/test_pipeline_worker.py"]
+depends_on = ["PIPE-04", "PIPE-02"]
+body = """
+Implement spec sections 5.2 (steps 2, 4, 5), 5.4 and 7: the one worker that drains the queue.
+
+class Worker(datadir, db_path, settings_like, llm_client, ...) with start(), stop(timeout=None), wake() and
+is_running(). settings_like needs model and document_timeout_s (web.settings.Settings has both); the OCR engine string
+is an optional constructor argument passed through to process_document.
+- One daemon thread, one worker per process: start() twice is an error. The thread opens its OWN connection with
+  store.db.open_db (connections are never shared between threads, spec 5.4) and closes it on exit. The worker requires
+  that the data directory lock is already held by this process (PIPE-02) and raises if it is not: it must not take the
+  lock itself.
+- Loop: claim_next_queued -> load the pinned template (batch manifest template id and version via
+  store.repo.get_batch and get_template) -> process_document -> commit_worker_outcome(conn, result_id,
+  claimed revision, claimed job, outcome). Documents are processed one at a time in queue order. When the queue is
+  empty the thread waits on an Event with a short poll interval (constructor argument, default 1 s) and wake() ends
+  the wait early.
+- If commit_worker_outcome returns False (a retry bumped the job, or a review save bumped the revision) the outcome is
+  discarded, nothing else is written, and the loop continues (spec 5.4).
+- After a successful commit only: move the file from process/ to archive/ with os.replace and update_document_path (the
+  stored path relative, forward slashes). A crash between the two steps is repaired by recovery (PIPE-02); a duplicate
+  is archived too (spec 5.2 step 3).
+- Unexpected exceptions from process_document must not kill the thread or loop forever on one document. Spec 7 lists
+  four failure codes and has no catch-all, so: log the exception class name only (never the message: it may contain
+  document text), and commit that result as status "failed" with error {"code": "PROCESSING_ERROR", "detail": the
+  class name}. PROCESSING_ERROR is a small addition to the spec list, kept in one named constant, and is flagged in the
+  task report for the maintainer to confirm. A missing template or a missing file is such an error too.
+- stop() sets a stop Event, cancels the running OCR job through the cancel event, and joins the thread within the
+  timeout. A result left in processing by a stop is put back by recovery on the next start (spec 5.4); do not commit
+  a half result.
+- Logging: one INFO line per document with result_id, source_file, status and elapsed seconds (spec 7: "a readable
+  title for each item").
+
+Acceptance (tests/test_pipeline_worker.py; real threads, real migrated database, fake OCR engine and fake LLM client
+from the earlier tasks' helpers, intake used to create batches): three queued documents are processed in order and end
+passed, with files in archive/ and paths updated; the worker idles and then processes a batch created after it started
+when woken; two batches are drained in batch order; an outcome whose job was bumped meanwhile (retry_result called from
+the test while the fake LLM is blocked on an Event) is discarded and the retried result is processed again and commits;
+the same for a revision bump; a document that raises an unexpected exception ends failed with PROCESSING_ERROR and the
+next document is still processed; a duplicate upload ends needs_review with DUPLICATE_DOCUMENT and is archived; a
+timeout document ends needs_review with PROCESSING_TIMEOUT and the worker continues with the next; stop() during a slow
+OCR job returns within the timeout and leaves the result in processing; a Worker without the lock held refuses to start;
+no OCR text in the captured log records (use caplog).
+"""
+
+[[task]]
+id = "PIPE-06"
+title = "pipeline: runtime start-up, app wiring and launcher"
+tier = "green"
+review = "technical"
+paths = ["src/privasheet/pipeline/runtime.py", "src/privasheet/web/app.py", "src/privasheet/web/settings.py",
+         "src/privasheet/__main__.py", "tests/test_pipeline_runtime.py"]
+depends_on = ["PIPE-05", "WEB-04"]
+body = """
+Start the pipeline with the app, per spec sections 5.4, 8 (Web UI, LLM client, Installation, Configuration). This task
+is wiring only: it adds no page, no template and no static file, and does not change any existing route or demo page
+(the Human owns the UI screens). WEB-04 is a dependency because it also edits web/app.py: build on its version of the
+file, do not revert anything it added.
+
+src/privasheet/pipeline/runtime.py
+- class PipelineRuntime(settings, *, ocr_engine=None, llm_client=None) with start(), stop() and status() -> dict.
+  start() in this order: DataDir.check_location and prepare, acquire the lock (AlreadyRunning propagates so the app
+  refuses to start), open_db + migrate, recover (PIPE-02), build llm.LlmClient(settings.base_url, settings.model)
+  unless one is injected (LlmConfigError propagates: a non-loopback URL makes the app refuse to start, spec 8), then
+  start the Worker. Any failure after the lock was taken releases it. stop() stops the worker and releases the lock and
+  is safe to call twice.
+- status() returns {"worker": "running" | "stopped", "queue": {status: count}} from
+  store.repo.count_results_by_status, opened on its own short-lived connection (the request thread must not use the
+  worker's connection).
+
+src/privasheet/web/app.py
+- create_app(settings=None, runtime=None): when a runtime is passed, start it on app start-up and stop it on shutdown
+  (FastAPI lifespan). With no runtime the app behaves exactly as today, so every existing test keeps passing unchanged.
+- GET /api/pipeline/status returns runtime.status() as JSON (503 with {"worker": "not_configured"} when there is no
+  runtime). It is a read-only endpoint, so the Host allowlist applies and the Origin check does not.
+
+src/privasheet/web/settings.py
+- PRIVASHEET_BASE_URL currently defaults to http://<host>:<port>, the web app's OWN address. It is the LLM endpoint
+  (spec 8) and D7 names Ollama as the default, so the default becomes http://127.0.0.1:11434. Change nothing else in
+  settings.
+
+src/privasheet/__main__.py
+- python -m privasheet: load_settings(), build a PipelineRuntime, create_app(settings, runtime) and run uvicorn on
+  settings.host and settings.port; a small build_app(settings) function does the wiring so tests never start a server.
+  A clear one-line message and exit code 1 when the runtime refuses to start (already running, bad data directory,
+  non-loopback LLM URL). This is the server entry point, not an extraction CLI (D8).
+
+Acceptance (tests/test_pipeline_runtime.py, TestClient style as in tests/test_web_app.py, fakes for OCR and LLM): starting
+creates the layout, migrates the database and starts the worker; a second runtime on the same data directory raises
+AlreadyRunning and the first keeps working; a non-loopback base URL makes start() raise LlmConfigError and leaves no
+lock held; stop() twice is fine and frees the lock; the status endpoint reports worker running and the queue counts
+after a batch is created through the intake API, and 503 without a runtime; the default base_url is
+http://127.0.0.1:11434 and an explicit one still wins; build_app wires a runtime and start-up/shutdown run through the
+lifespan. All pre-existing tests pass unchanged.
+"""
+
+[[task]]
+id = "PIPE-07"
+title = "pipeline: end-to-end acceptance test (upload to JSONL)"
+tier = "green"
+review = "technical"
+paths = ["tests/test_pipeline_e2e.py", "tests/fake_ocr.py", "src/privasheet/pipeline/**", "src/privasheet/ocr/**",
+         "src/privasheet/store/repo.py", "tests/test_pipeline_process.py", "tests/test_pipeline_worker.py",
+         "tests/test_pipeline_intake.py", "tests/test_pipeline_runtime.py", "tests/test_ocr_runner.py"]
+depends_on = ["PIPE-03", "PIPE-06"]
+body = """
+Prove the whole chain of spec section 3 works together: upload -> ingest -> ocr -> layout -> extractor -> validate ->
+store -> export, on synthetic data, through the same runtime the app starts. This is the acceptance test for readiness
+finding 1. The real RapidOCR engine and a real LLM are not available in this environment, so both are replaced by the
+fakes; say so in the module docstring, and keep the fake OCR output derived from the same text the test draws on the
+image so the scenario stays honest.
+
+tests/test_pipeline_e2e.py builds, in a tmp_path data directory, a valid template (templates.ensure_valid) with
+invoice_no (text, required, key label), invoice_date (date DD/MM/YYYY), total (decimal, required, key label) and a
+line_items table, inserts it, draws synthetic invoices with Pillow (or with spike.generator if you prefer), and drives
+PipelineRuntime with the fake OCR engine (tests/fake_ocr.py) and a fake LLM that answers by reading the OCR lines in the
+prompt it receives (so a wrong box id would fail). Scenarios, each its own test:
+1. Happy path: three different invoices uploaded through pipeline.intake.create_batch; wait (bounded, with a timeout
+   and no fixed sleeps longer than the poll interval) until the queue is empty; all three are passed; every stored
+   path resolves inside the data directory and exists; snapshot rows and page images exist; documents.snapshot_id is
+   set; and export.build_jsonl (selectable_documents, then build_jsonl, then write_atomic to exports/) produces lines
+   that equal the expected JSON exactly, with canonical dates and plain decimals.
+2. Bad input and duplicates: one corrupt file and one non-image are rejected at intake with no rows; the same invoice
+   uploaded twice ends needs_review with DUPLICATE_DOCUMENT carrying the earlier document_id, and export refuses it.
+3. Human-review triggers: an LLM answer with an uncertain field and one with a missing required field both end
+   needs_review with AI_UNCERTAIN / REQUIRED_MISSING, and export.build_jsonl refuses them until a review exists.
+4. Failure and retry: an LLM that is unavailable ends failed LLM_UNAVAILABLE; store.repo.retry_result requeues it and,
+   after the fake recovers, the worker completes it (job incremented, single outcome).
+5. Timeout: the OCR fake sleeps longer than a 1 second document budget: needs_review with PROCESSING_TIMEOUT, the next
+   document is still processed.
+6. Restart recovery: leave a result in processing and a moved-but-unrecorded file (start a runtime, stop it, edit the
+   database as a crash would), start a new runtime: recovery requeues it and the document completes; an orphan upload is
+   removed. A second runtime on the same data directory while the first runs raises AlreadyRunning.
+7. Batch editing: a queued document removed with remove_file never reaches the worker; a document added with add_files
+   after the worker started is processed.
+
+If a scenario exposes a defect in src/privasheet/pipeline/**, src/privasheet/ocr/** or store/repo.py, fix it there with
+the smallest change and add or extend the unit test in the file that owns it (those test files are in the allowed
+paths for exactly that). List each such fix in the commit body. Do not weaken or delete any existing test. If a fix
+would need a change outside the allowed paths (for example in extractor.py or validate), stop and explain instead.
+"""
