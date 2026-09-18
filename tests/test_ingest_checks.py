@@ -55,13 +55,6 @@ def test_ingest_has_no_file_or_page_count_limit_api():
     assert not hasattr(checks, "check_batch_size")
 
 
-def test_check_batch_size_uses_file_limit():
-    limits = Limits()
-
-    assert not hasattr(limits, "max_files")
-    assert not hasattr(checks, "check_batch_size")
-
-
 @pytest.mark.parametrize(
     "header,expected",
     [
@@ -131,20 +124,6 @@ def test_inspect_allows_more_than_previous_page_limit_for_pdf_and_tiff(tmp_path)
     assert len(tiff_pages) == 11
     assert [page.page for page in pdf_pages] == list(range(1, 12))
     assert [page.page for page in tiff_pages] == list(range(1, 12))
-
-
-def test_inspect_rejects_too_many_pages_for_pdf_and_tiff(tmp_path):
-    sizes = [(10 + index, 12 + index) for index in range(11)]
-
-    pdf_pages = inspect(save_pdf(tmp_path / "many.pdf", sizes), "pdf", Limits())
-    tiff_pages = inspect(save_tiff(tmp_path / "many.tiff", sizes), "tiff", Limits())
-
-    assert len(pdf_pages) == 11
-    assert len(tiff_pages) == 11
-    assert all(page.pixels <= Limits().max_megapixels * 1_000_000 for page in pdf_pages)
-    assert all(
-        page.pixels <= Limits().max_megapixels * 1_000_000 for page in tiff_pages
-    )
 
 
 @pytest.mark.parametrize(
@@ -217,7 +196,9 @@ def test_inspect_pdf_reads_page_geometry_without_rendering(monkeypatch, tmp_path
     ]
 
 
-def test_inspect_pdf_rejects_page_limit_before_opening_pages(monkeypatch, tmp_path):
+def test_inspect_pdf_reads_geometry_for_many_pages_without_rendering(
+    monkeypatch, tmp_path
+):
     import pypdfium2 as pdfium
 
     sizes = [(72 + index, 144 + index) for index in range(11)]
@@ -292,7 +273,7 @@ def test_inspect_tiff_allows_all_frames(monkeypatch, tmp_path):
     assert pages[-1] == PageInfo(page=11, width_px=20, height_px=30, pixels=20 * 30)
 
 
-def test_inspect_tiff_rejects_page_limit_before_seeking_frames(monkeypatch, tmp_path):
+def test_inspect_tiff_reads_geometry_for_many_frames(monkeypatch, tmp_path):
     from PIL import Image
 
     sought_frames = []
