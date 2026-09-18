@@ -236,8 +236,9 @@ def test_settings_default_data_dir_is_installation_adjacent_temp(tmp_path, monke
 
     assert settings.port == 8765
     assert settings.allowed_hosts == ("127.0.0.1", "localhost")
-    assert (
-        settings.data_dir
-        == Path(load_settings.__code__.co_filename).parents[2] / "temp"
-    )
+    # Derive the expectation from the repository, not from the code under test: the previous
+    # assertion recomputed the production expression and so passed for any parents[] index.
+    installation_root = Path(__file__).resolve().parents[1]
+    assert settings.data_dir == installation_root / "temp"
+    assert installation_root / "src" not in settings.data_dir.parents
     assert settings.document_timeout_s == 600
