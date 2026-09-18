@@ -4,10 +4,13 @@ import sqlite3
 
 import pytest
 
-from privasheet.store import migrate, open_db
+from privasheet.store import StoreError, dumps, loads, migrate, open_db
 from privasheet.store.repo import (
+    add_documents_to_batch,
     commit_worker_outcome,
     create_batch,
+    delete_document,
+    find_documents_by_sha256,
     get_result,
     get_snapshot,
     get_template,
@@ -17,6 +20,8 @@ from privasheet.store.repo import (
     list_results,
     list_templates,
     read_transaction,
+    remove_queued_document,
+    update_document_path,
     update_result_review,
 )
 
@@ -33,6 +38,7 @@ def template_doc(template_id="invoice-a", version=1, name="Invoice A"):
     return {
         "template_id": template_id,
         "version": version,
+        "version_label": f"1.{version - 1}.20260917",
         "name": name,
         "created_at": f"2026-09-17T00:00:0{version}Z",
         "fields": [],
@@ -163,6 +169,85 @@ def test_create_batch_inserts_documents_results_and_batch_atomically(conn):
     ).fetchone()
 
 
+def test_find_documents_by_sha256_returns_prior_matches(conn):
+    seed_batch(conn)
+    conn.execute("UPDATE documents SET sha256 = 'same'")
+
+    assert find_documents_by_sha256(conn, "same") == [
+        {
+            "document_id": "doc_1",
+            "sha256": "same",
+            "source_file": "scan_1.pdf",
+            "path": "documents/scan_1.pdf",
+            "snapshot_id": "sha256:s1",
+        },
+        {
+            "document_id": "doc_2",
+            "sha256": "same",
+            "source_file": "scan_2.pdf",
+            "path": "documents/scan_2.pdf",
+            "snapshot_id": "sha256:s1",
+        },
+    ]
+    assert find_documents_by_sha256(conn, "same", before_document_id="doc_2") == [
+        {
+            "document_id": "doc_1",
+            "sha256": "same",
+            "source_file": "scan_1.pdf",
+            "path": "documents/scan_1.pdf",
+            "snapshot_id": "sha256:s1",
+        }
+    ]
+
+
+def test_add_documents_to_batch_appends_manifest_documents_and_results(conn):
+    seed_batch(conn)
+    new_document = document_doc("doc_3", "res_3", "scan_3.pdf")
+    new_result = result_doc("res_3", "doc_3")
+
+    add_documents_to_batch(conn, "bat_1", [new_document], [new_result])
+
+    manifest = conn.execute(
+        "SELECT doc FROM batches WHERE batch_id = 'bat_1'"
+    ).fetchone()[0]
+    assert [doc["document_id"] for doc in list_results(conn, "bat_1")] == [
+        "doc_2",
+        "doc_1",
+        "doc_3",
+    ]
+    manifest_doc = loads(manifest)
+    assert manifest_doc["documents"][-1] == {
+        "document_id": "doc_3",
+        "result_id": "res_3",
+        "source_file": "scan_3.pdf",
+    }
+    assert get_result(conn, "res_3") == new_result
+
+
+def test_add_documents_to_batch_rolls_back_on_failure(conn):
+    seed_batch(conn)
+    duplicate = document_doc("doc_3", "res_1", "scan_3.pdf")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        add_documents_to_batch(
+            conn,
+            "bat_1",
+            [duplicate],
+            [result_doc("res_1", "doc_3")],
+        )
+
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM documents WHERE document_id = 'doc_3'"
+        ).fetchone()[0]
+        == 0
+    )
+    assert [doc["document_id"] for doc in list_results(conn, "bat_1")] == [
+        "doc_2",
+        "doc_1",
+    ]
+
+
 def test_create_batch_rolls_back_when_one_insert_fails(conn):
     insert_template(conn, template_doc())
     insert_snapshot(conn, snapshot_doc())
@@ -206,6 +291,22 @@ def test_update_result_review_checks_revision_and_increments(conn):
     assert get_result(conn, "res_1") == stored
 
 
+def test_result_status_can_be_rejected(conn):
+    seed_batch(conn)
+    rejected = dict(
+        result_doc("res_1", "doc_1"),
+        status="rejected",
+        review={
+            "fields": {},
+            "tables": {},
+            "acknowledged": {"revision": 1, "issues": []},
+        },
+    )
+
+    assert update_result_review(conn, "res_1", expected_revision=1, doc=rejected)
+    assert get_result(conn, "res_1") == dict(rejected, revision=2)
+
+
 def test_commit_worker_outcome_checks_revision_and_job_then_increments(conn):
     seed_batch(conn)
     passed = dict(
@@ -227,6 +328,116 @@ def test_commit_worker_outcome_checks_revision_and_job_then_increments(conn):
         conn, "res_1", expected_revision=1, expected_job=1, doc=dict(stored, job=1)
     )
     assert get_result(conn, "res_1") == stored
+
+
+def test_update_document_path(conn):
+    seed_batch(conn)
+
+    update_document_path(conn, "doc_1", "archive/scan_1.pdf")
+
+    assert (
+        conn.execute(
+            "SELECT path FROM documents WHERE document_id = 'doc_1'"
+        ).fetchone()[0]
+        == "archive/scan_1.pdf"
+    )
+
+
+def test_remove_queued_document_deletes_batch_entry_result_and_document(conn):
+    seed_batch(conn)
+
+    assert remove_queued_document(conn, "bat_1", "doc_2") == "documents/scan_2.pdf"
+
+    assert get_result(conn, "res_2") is None
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM documents WHERE document_id = 'doc_2'"
+        ).fetchone()[0]
+        == 0
+    )
+    assert [doc["document_id"] for doc in list_results(conn, "bat_1")] == ["doc_1"]
+
+
+def test_remove_queued_document_refuses_locked_status(conn):
+    seed_batch(conn)
+    processing = dict(result_doc("res_1", "doc_1"), status="processing")
+    conn.execute(
+        "UPDATE results SET doc = ? WHERE result_id = 'res_1'", (dumps(processing),)
+    )
+
+    with pytest.raises(StoreError, match="locked"):
+        remove_queued_document(conn, "bat_1", "doc_1")
+
+    assert get_result(conn, "res_1") == processing
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM documents WHERE document_id = 'doc_1'"
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_delete_document_removes_rows_and_unreferenced_snapshot(conn):
+    seed_batch(conn)
+
+    assert delete_document(conn, "doc_1") == ["documents/scan_1.pdf"]
+
+    assert get_result(conn, "res_1") is None
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM documents WHERE document_id = 'doc_1'"
+        ).fetchone()[0]
+        == 0
+    )
+    assert get_snapshot(conn, "sha256:s1") is not None
+    assert [doc["document_id"] for doc in list_results(conn, "bat_1")] == ["doc_2"]
+
+    assert delete_document(conn, "doc_2") == [
+        "documents/scan_2.pdf",
+        "pages/s1/page-1.png",
+    ]
+    assert get_snapshot(conn, "sha256:s1") is None
+
+
+def test_delete_document_refuses_processing(conn):
+    seed_batch(conn)
+    processing = dict(result_doc("res_1", "doc_1"), status="processing")
+    conn.execute(
+        "UPDATE results SET doc = ? WHERE result_id = 'res_1'", (dumps(processing),)
+    )
+
+    with pytest.raises(StoreError, match="processing"):
+        delete_document(conn, "doc_1")
+
+    assert get_result(conn, "res_1") == processing
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM documents WHERE document_id = 'doc_1'"
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_delete_document_keeps_template_sample_document_and_snapshot(conn):
+    seed_batch(conn)
+    sample_template = dict(
+        template_doc(template_id="sample-template"),
+        sample_document_id="doc_1",
+        sample_snapshot_id="sha256:s1",
+    )
+    insert_template(conn, sample_template)
+
+    assert delete_document(conn, "doc_1") == []
+
+    assert get_result(conn, "res_1") is None
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM documents WHERE document_id = 'doc_1'"
+        ).fetchone()[0]
+        == 1
+    )
+    assert get_snapshot(conn, "sha256:s1") is not None
+    assert [doc["document_id"] for doc in list_results(conn, "bat_1")] == ["doc_2"]
 
 
 def test_read_transaction_uses_one_consistent_read_transaction(conn):

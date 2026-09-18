@@ -51,7 +51,7 @@ def test_missing_json_refused(monkeypatch, tmp_path):
 
 def test_fresh_and_idempotent(conn):
     migrate(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     assert {
         r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'")
     } == {"templates", "documents", "snapshots", "batches", "results"}
@@ -66,6 +66,11 @@ def test_fresh_and_idempotent(conn):
     }
     assert ("batch_id",) in indexed
     assert ("status",) in indexed
+    indexed = {
+        tuple(r[2] for r in conn.execute(f"PRAGMA index_info({row[1]})"))
+        for row in conn.execute("PRAGMA index_list(documents)")
+    }
+    assert ("sha256",) in indexed
 
 
 def test_failed_migration_is_atomic(conn, monkeypatch):
@@ -80,7 +85,7 @@ def test_failed_migration_is_atomic(conn, monkeypatch):
     monkeypatch.setattr(schema, "MIGRATIONS", [*schema.MIGRATIONS, broken])
     with pytest.raises(sqlite3.OperationalError):
         migrate(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     assert conn.execute("SELECT doc FROM snapshots").fetchone()[0] == "{}"
     assert not conn.execute(
         "SELECT 1 FROM sqlite_schema WHERE name='temporary_migration'"
@@ -167,12 +172,39 @@ def test_generated_columns_and_foreign_keys(conn):
     row = conn.execute("SELECT * FROM results").fetchone()
     assert all(row[k] == v for k, v in result.items())
     for table, expected in [
-        ("templates", {"name": "Synthetic", "created_at": "today"}),
+        (
+            "templates",
+            {
+                "name": "Synthetic",
+                "created_at": "today",
+                "version_label": None,
+            },
+        ),
         ("snapshots", {"created_at": "today"}),
         ("batches", {"template_id": "t", "template_version": 1, "created_at": "today"}),
     ]:
         row = conn.execute(f"SELECT * FROM {table}").fetchone()
         assert all(row[k] == v for k, v in expected.items())
+    conn.execute(
+        "INSERT INTO templates(template_id, version, doc) VALUES (?, ?, ?)",
+        (
+            "with-label",
+            1,
+            dumps(
+                {
+                    "name": "Labeled",
+                    "created_at": "today",
+                    "version_label": "1.0.20260917",
+                }
+            ),
+        ),
+    )
+    assert (
+        conn.execute(
+            "SELECT version_label FROM templates WHERE template_id = 'with-label'"
+        ).fetchone()[0]
+        == "1.0.20260917"
+    )
     for key in ("batch_id", "document_id"):
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
