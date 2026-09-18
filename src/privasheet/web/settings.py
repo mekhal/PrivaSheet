@@ -29,7 +29,7 @@ class Settings:
 
 
 def _default_data_dir() -> Path:
-    return Path(__file__).resolve().parents[2] / "temp"
+    return Path(__file__).resolve().parents[3] / "temp"
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
