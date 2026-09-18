@@ -54,7 +54,17 @@ def _v1(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_v1]
+def _v2(conn: sqlite3.Connection) -> None:
+    statements = (
+        "CREATE INDEX documents_sha256 ON documents(sha256)",
+        """ALTER TABLE templates ADD COLUMN version_label TEXT
+            GENERATED ALWAYS AS (json_extract(doc, '$.version_label')) VIRTUAL""",
+    )
+    for statement in statements:
+        conn.execute(statement)
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_v1, _v2]
 
 
 def migrate(conn: sqlite3.Connection) -> None:
