@@ -71,6 +71,7 @@ class LlmClient:
             "Accept": "application/json",
         }
         request_timeout = self._timeout if timeout is None else timeout
+        _verify_loopback_resolution(self._host, self._port)
         conn_class = (
             http.client.HTTPSConnection
             if self._scheme == "https"
