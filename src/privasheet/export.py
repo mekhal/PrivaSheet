@@ -3,31 +3,50 @@
 import json
 import os
 import tempfile
+from collections.abc import Iterable
+from datetime import UTC
 from pathlib import Path
 
 
 class ExportNotAllowed(ValueError):
-    """A batch still contains documents awaiting processing or review."""
+    """A selected document is not currently exportable."""
 
 
-def build_jsonl(manifest: dict, results: dict[str, dict], template: dict) -> str:
+EXPORTABLE_STATUSES = {"passed", "reviewed"}
+
+
+def build_jsonl(
+    manifest: dict,
+    results: dict[str, dict],
+    template: dict,
+    selected_document_ids: Iterable[str],
+) -> str:
     """Return export lines in manifest order without modifying the inputs.
 
     The caller must read the manifest and results in one read transaction so
     eligibility and exported values describe the same state.
     """
+    selected = set(selected_document_ids)
+    found = set()
     for document in manifest["documents"]:
-        status = results[document["result_id"]]["status"]
-        if status in {"queued", "processing", "needs_review"}:
+        if document["document_id"] not in selected:
+            continue
+        found.add(document["document_id"])
+        status = results.get(document["result_id"], {}).get("status")
+        if status not in EXPORTABLE_STATUSES:
             raise ExportNotAllowed(
-                f"Result {document['result_id']} is {status}; batch is incomplete"
+                f"Document {document['document_id']} is {status}; export is not allowed"
             )
+    missing = selected - found
+    if missing:
+        document_id = min(missing)
+        raise ExportNotAllowed(f"Document {document_id} is not in the batch")
 
     lines = []
     for document in manifest["documents"]:
-        result = results[document["result_id"]]
-        if result["status"] not in {"passed", "reviewed"}:
+        if document["document_id"] not in selected:
             continue
+        result = results[document["result_id"]]
         review = result.get("review")
         values = review if review is not None else result["extracted"]
 
@@ -65,6 +84,23 @@ def build_jsonl(manifest: dict, results: dict[str, dict], template: dict) -> str
             + "\n"
         )
     return "".join(lines)
+
+
+def selectable_documents(manifest: dict, results: dict[str, dict]) -> list[str]:
+    """Return document IDs that can currently be exported, in manifest order."""
+    return [
+        document["document_id"]
+        for document in manifest["documents"]
+        if results.get(document["result_id"], {}).get("status") in EXPORTABLE_STATUSES
+    ]
+
+
+def export_filename(batch_id: str, now) -> str:
+    """Return the JSONL export filename with a filename-safe UTC timestamp."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    timestamp = now.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"{batch_id}-{timestamp}.jsonl"
 
 
 def failed_documents(manifest: dict, results: dict[str, dict]) -> list[str]:

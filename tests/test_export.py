@@ -3,6 +3,7 @@
 import json
 import os
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,9 @@ import pytest
 from privasheet.export import (
     ExportNotAllowed,
     build_jsonl,
+    export_filename,
     failed_documents,
+    selectable_documents,
     write_atomic,
 )
 
@@ -28,7 +31,8 @@ def batch():
                     {"key": key}
                     for key in ("description", "qty", "unit_price", "amount")
                 ],
-            }
+            },
+            {"key": "taxes", "columns": [{"key": "code"}, {"key": "amount"}]},
         ],
     }
     manifest = {
@@ -86,12 +90,13 @@ def batch():
 
 def test_spec_example_exactly_and_no_mutation(batch):
     original = deepcopy(batch)
-    assert build_jsonl(*batch) == (
+    assert build_jsonl(*batch, ["doc_01J…"]) == (
         '{"schema_version":1,"batch_id":"bat_01J…","document_id":"doc_01J…",'
         '"source_file":"scan_001.jpg","template":{"id":"abc-layout-1","version":2},'
         '"human_reviewed":true,"fields":{"invoice_no":"INV-0042","date":"2026-09-01",'
         '"total":"1284.00","po_no":null},"tables":{"line_items":[{"description":'
-        '"Paper A4","qty":"2","unit_price":"600.00","amount":"1200.00"}]}}\n'
+        '"Paper A4","qty":"2","unit_price":"600.00","amount":"1200.00"}],'
+        '"taxes":[]}}\n'
     )
     assert batch == original
 
@@ -104,7 +109,7 @@ def test_extracted_canonical_values_and_missing_cells(batch):
     row = result["extracted"]["tables"]["line_items"][0]
     del row["qty"]
     row["amount"] = {"raw": "unparseable", "value": None}
-    line = json.loads(build_jsonl(*batch))
+    line = json.loads(build_jsonl(*batch, ["doc_01J…"]))
     assert line["human_reviewed"] is False
     assert line["fields"] == {
         "invoice_no": "INV-0042",
@@ -120,7 +125,8 @@ def test_extracted_canonical_values_and_missing_cells(batch):
                 "unit_price": "600.00",
                 "amount": None,
             }
-        ]
+        ],
+        "taxes": [],
     }
 
 
@@ -136,7 +142,7 @@ def test_review_is_complete_effective_result(batch, status):
             },
         },
     )
-    line = json.loads(build_jsonl(*batch))
+    line = json.loads(build_jsonl(*batch, ["doc_01J…"]))
     assert line["human_reviewed"] is (status == "reviewed")
     assert line["fields"] == dict.fromkeys(("invoice_no", "date", "total", "po_no"))
     assert line["tables"]["line_items"] == [
@@ -144,7 +150,10 @@ def test_review_is_complete_effective_result(batch, status):
         {"description": None, "qty": "0", "unit_price": None, "amount": None},
     ]
     result["review"] = {"fields": {}, "tables": {}}
-    assert json.loads(build_jsonl(*batch))["tables"] == {"line_items": []}
+    assert json.loads(build_jsonl(*batch, ["doc_01J…"]))["tables"] == {
+        "line_items": [],
+        "taxes": [],
+    }
 
 
 def test_manifest_order_and_failed_documents(batch):
@@ -163,7 +172,7 @@ def test_manifest_order_and_failed_documents(batch):
             "extracted": {"fields": {}, "tables": {}},
         }
     results["outside_batch"] = {"status": "queued"}
-    text = build_jsonl(manifest, results, template)
+    text = build_jsonl(manifest, results, template, ["doc_1", "doc_01J…"])
     assert text.endswith("\n")
     assert [json.loads(line)["document_id"] for line in text.splitlines()] == [
         "doc_1",
@@ -172,24 +181,116 @@ def test_manifest_order_and_failed_documents(batch):
     assert failed_documents(manifest, results) == ["scan_2.jpg", "scan_0.jpg"]
 
 
-@pytest.mark.parametrize("status", ["queued", "processing", "needs_review"])
-def test_incomplete_batch_cannot_export(batch, status):
+def test_selected_export_uses_manifest_order_and_allows_unfinished_batch(batch):
+    manifest, results, template = batch
+    for index, status in enumerate(
+        ("passed", "queued", "reviewed", "processing"), start=2
+    ):
+        document = {
+            "document_id": f"doc_{index}",
+            "result_id": f"res_{index}",
+            "source_file": f"scan_{index}.jpg",
+        }
+        manifest["documents"].append(document)
+        results[document["result_id"]] = {
+            **document,
+            "status": status,
+            "review": {"fields": {"invoice_no": f"INV-{index}"}, "tables": {}}
+            if status == "reviewed"
+            else None,
+            "extracted": {
+                "fields": {"invoice_no": {"value": f"INV-{index}"}},
+                "tables": {},
+            },
+        }
+
+    text = build_jsonl(manifest, results, template, ["doc_4", "doc_2"])
+
+    lines = [json.loads(line) for line in text.splitlines()]
+    assert [line["document_id"] for line in lines] == ["doc_2", "doc_4"]
+    assert [line["fields"]["invoice_no"] for line in lines] == ["INV-2", "INV-4"]
+    assert selectable_documents(manifest, results) == ["doc_01J…", "doc_2", "doc_4"]
+
+
+def test_incomplete_batch_cannot_export(batch):
+    manifest, results, template = batch
+    refused_statuses = ["rejected", "needs_review", "failed", "queued", "processing"]
+    for status in refused_statuses:
+        document = {
+            "document_id": f"doc_{status}",
+            "result_id": f"res_{status}",
+            "source_file": f"{status}.jpg",
+        }
+        manifest["documents"].append(document)
+        results[document["result_id"]] = {
+            **document,
+            "status": status,
+            "review": None,
+            "extracted": {"fields": {}, "tables": {}},
+        }
+
+    assert selectable_documents(manifest, results) == ["doc_01J…"]
+    for status in refused_statuses:
+        with pytest.raises(ExportNotAllowed, match=f"doc_{status}"):
+            build_jsonl(manifest, results, template, [f"doc_{status}"])
+
+    del results["res_processing"]
+    assert selectable_documents(manifest, results) == ["doc_01J…"]
+    with pytest.raises(ExportNotAllowed, match="doc_processing"):
+        build_jsonl(manifest, results, template, ["doc_processing"])
+
+
+@pytest.mark.parametrize(
+    "status", ["rejected", "needs_review", "failed", "queued", "processing"]
+)
+def test_selected_documents_must_be_passed_or_reviewed(batch, status):
     manifest, results, _ = batch
-    manifest["documents"].append({"result_id": "pending"})
-    results["pending"] = {"status": status}
-    with pytest.raises(ExportNotAllowed):
-        build_jsonl(*batch)
+    manifest["documents"].append({"document_id": "doc_refused", "result_id": "refused"})
+    results["refused"] = {"status": status}
+    with pytest.raises(ExportNotAllowed, match="doc_refused"):
+        build_jsonl(*batch, ["doc_01J…", "doc_refused"])
     assert issubclass(ExportNotAllowed, ValueError)
+
+
+def test_unknown_selected_document_cannot_export(batch):
+    with pytest.raises(ExportNotAllowed, match="doc_missing"):
+        build_jsonl(*batch, ["doc_missing"])
+
+
+def test_empty_selection_and_failed_batches(batch):
+    manifest, results, template = batch
+    results["res_01J…"] = {"status": "failed", "extracted": None}
+    with pytest.raises(ExportNotAllowed):
+        build_jsonl(*batch, ["doc_01J…"])
+    assert build_jsonl(manifest, results, template, []) == ""
+    assert selectable_documents(manifest, results) == []
+    assert failed_documents(manifest, results) == ["scan_001.jpg"]
+    manifest["documents"] = []
+    assert build_jsonl(manifest, results, template, []) == ""
+    assert failed_documents(manifest, results) == []
 
 
 def test_empty_and_all_failed_batches(batch):
     manifest, results, template = batch
-    results["res_01J…"] = {"status": "failed", "extracted": None}
-    assert build_jsonl(*batch) == ""
-    assert failed_documents(manifest, results) == ["scan_001.jpg"]
+    results["res_01J…"] = {
+        **results["res_01J…"],
+        "status": "failed",
+        "review": None,
+    }
+
+    assert selectable_documents(manifest, results) == []
+    assert build_jsonl(manifest, results, template, []) == ""
+    with pytest.raises(ExportNotAllowed, match="doc_01J…"):
+        build_jsonl(manifest, results, template, ["doc_01J…"])
+
     manifest["documents"] = []
-    assert build_jsonl(manifest, results, template) == ""
-    assert failed_documents(manifest, results) == []
+    assert selectable_documents(manifest, results) == []
+    assert build_jsonl(manifest, results, template, []) == ""
+
+
+def test_export_filename_uses_utc_timestamp():
+    now = datetime(2026, 9, 18, 1, 2, 3, tzinfo=timezone(timedelta(hours=7)))
+    assert export_filename("bat_01J", now) == "bat_01J-20260917T180203Z.jsonl"
 
 
 def test_atomic_write_flushes_syncs_and_replaces(tmp_path, monkeypatch):
