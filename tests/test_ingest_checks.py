@@ -55,6 +55,12 @@ def test_ingest_has_no_file_or_page_count_limit_api():
     assert not hasattr(checks, "check_batch_size")
 
 
+def test_check_batch_size_uses_file_limit():
+    limits = Limits()
+    assert not hasattr(limits, "max_files")
+    assert not hasattr(checks, "check_batch_size")
+
+
 @pytest.mark.parametrize(
     "header,expected",
     [
@@ -124,6 +130,16 @@ def test_inspect_allows_more_than_previous_page_limit_for_pdf_and_tiff(tmp_path)
     assert len(tiff_pages) == 11
     assert [page.page for page in pdf_pages] == list(range(1, 12))
     assert [page.page for page in tiff_pages] == list(range(1, 12))
+
+
+def test_inspect_rejects_too_many_pages_for_pdf_and_tiff(tmp_path):
+    sizes = [(10 + index, 12 + index) for index in range(11)]
+
+    pdf_pages = inspect(save_pdf(tmp_path / "many.pdf", sizes), "pdf", Limits())
+    tiff_pages = inspect(save_tiff(tmp_path / "many.tiff", sizes), "tiff", Limits())
+
+    assert len(pdf_pages) == 11
+    assert len(tiff_pages) == 11
 
 
 @pytest.mark.parametrize(
@@ -242,6 +258,49 @@ def test_inspect_pdf_reads_geometry_for_many_pages_without_rendering(
     assert pages[-1] == PageInfo(page=11, width_px=82, height_px=154, pixels=82 * 154)
 
 
+def test_inspect_pdf_rejects_page_limit_before_opening_pages(monkeypatch, tmp_path):
+    import pypdfium2 as pdfium
+
+    sizes = [(72 + index, 144 + index) for index in range(11)]
+    opened_pages = []
+
+    class FakePage:
+        def __init__(self, index):
+            self.index = index
+
+        def get_size(self):
+            return sizes[self.index]
+
+        def render(self, **_kwargs):
+            raise AssertionError("page inspection must not render PDF pages")
+
+        def close(self):
+            pass
+
+    class FakePdfDocument:
+        def __init__(self, _path):
+            pass
+
+        def __len__(self):
+            return len(sizes)
+
+        def __getitem__(self, index):
+            opened_pages.append(index)
+            return FakePage(index)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pdfium, "PdfDocument", FakePdfDocument)
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"%PDF-1.7\n")
+
+    pages = inspect(path, "pdf", Limits(pdf_dpi=72))
+
+    assert opened_pages == list(range(11))
+    assert [page.page for page in pages] == list(range(1, 12))
+
+
 def test_inspect_tiff_allows_all_frames(monkeypatch, tmp_path):
     from PIL import Image
 
@@ -310,6 +369,44 @@ def test_inspect_tiff_reads_geometry_for_many_frames(monkeypatch, tmp_path):
 
 
 def test_inspect_tiff_does_not_decode_frames_for_many_pages(monkeypatch, tmp_path):
+    from PIL import Image
+
+    sought_frames = []
+
+    class FakeTiff:
+        n_frames = 11
+
+        def __init__(self):
+            self.index = 0
+
+        @property
+        def size(self):
+            return (20 + self.index, 30 + self.index)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def seek(self, index):
+            sought_frames.append(index)
+            self.index = index
+
+        def load(self):
+            raise AssertionError("page inspection must not decode TIFF frames")
+
+    monkeypatch.setattr(Image, "open", lambda _path: FakeTiff())
+    path = tmp_path / "doc.tiff"
+    path.write_bytes(b"II*\x00")
+
+    pages = inspect(path, "tiff", Limits())
+
+    assert sought_frames == list(range(11))
+    assert [page.page for page in pages] == list(range(1, 12))
+
+
+def test_inspect_tiff_rejects_page_limit_before_seeking_frames(monkeypatch, tmp_path):
     from PIL import Image
 
     sought_frames = []
