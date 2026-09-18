@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
+from base64 import b64encode
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -117,6 +118,116 @@ DEMO_RESULTS = {
         "extracted": {"fields": {}, "tables": {}},
         "review": None,
     },
+}
+
+
+def _synthetic_page_image(label: str, width: int, height: int) -> str:
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  <rect width="100%" height="100%" fill="#f8f9fa"/>
+  <rect x="36" y="32" width="{width - 72}" height="{height - 64}" fill="#ffffff" stroke="#dee2e6"/>
+  <text x="56" y="72" font-family="Arial, sans-serif" font-size="22" fill="#212529">{label}</text>
+  <line x1="56" y1="96" x2="{width - 56}" y2="96" stroke="#adb5bd"/>
+  <text x="56" y="146" font-family="Arial, sans-serif" font-size="18" fill="#212529">Invoice No: INV-0042</text>
+  <text x="56" y="204" font-family="Arial, sans-serif" font-size="18" fill="#212529">Date: 2026-09-18</text>
+  <text x="56" y="286" font-family="Arial, sans-serif" font-size="18" fill="#212529">Synthetic service</text>
+  <text x="{width - 190}" y="346" font-family="Arial, sans-serif" font-size="20" fill="#212529">Total 1,284.00</text>
+</svg>"""
+    encoded = b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
+
+
+DEMO_OVERLAY_DATA = {
+    "document_label": "synthetic_invoice_003.pdf",
+    "fields": [
+        {"key": "invoice_no", "label": "Invoice number"},
+        {"key": "date", "label": "Date"},
+        {"key": "total", "label": "Total"},
+    ],
+    "snapshot": {
+        "pages": [
+            {
+                "page": 1,
+                "label": "synthetic-page-1",
+                "width": 640,
+                "height": 420,
+                "image": _synthetic_page_image("Synthetic invoice", 640, 420),
+                "boxes": [
+                    {
+                        "id": "p1-b1",
+                        "text": "Invoice No: INV-0042",
+                        "quad": [
+                            [0.0875, 0.307],
+                            [0.392, 0.307],
+                            [0.392, 0.36],
+                            [0.0875, 0.36],
+                        ],
+                    },
+                    {
+                        "id": "p1-b2",
+                        "text": "Date: 2026-09-18",
+                        "quad": [
+                            [0.0875, 0.445],
+                            [0.334, 0.445],
+                            [0.334, 0.498],
+                            [0.0875, 0.498],
+                        ],
+                    },
+                    {
+                        "id": "p1-b3",
+                        "text": "Synthetic service",
+                        "quad": [
+                            [0.0875, 0.641],
+                            [0.334, 0.641],
+                            [0.334, 0.693],
+                            [0.0875, 0.693],
+                        ],
+                    },
+                    {
+                        "id": "p1-b4",
+                        "text": "Total 1,284.00",
+                        "quad": [
+                            [0.703, 0.784],
+                            [0.914, 0.784],
+                            [0.914, 0.841],
+                            [0.703, 0.841],
+                        ],
+                    },
+                ],
+            },
+            {
+                "page": 2,
+                "label": "synthetic-page-2",
+                "width": 640,
+                "height": 420,
+                "image": _synthetic_page_image("Synthetic addendum", 640, 420),
+                "boxes": [
+                    {
+                        "id": "p2-b1",
+                        "text": "Payment due on receipt",
+                        "quad": [
+                            [0.0875, 0.307],
+                            [0.423, 0.307],
+                            [0.423, 0.36],
+                            [0.0875, 0.36],
+                        ],
+                    },
+                    {
+                        "id": "p2-b2",
+                        "text": "Thank you",
+                        "quad": [
+                            [0.0875, 0.445],
+                            [0.232, 0.445],
+                            [0.232, 0.498],
+                            [0.0875, 0.498],
+                        ],
+                    },
+                ],
+            },
+        ]
+    },
+    "assigned": {"invoice_no": ["p1-b1"], "total": ["p1-b4"]},
+    "spans": {"invoice_no": "INV-0042", "total": "1,284.00"},
+    "result": {"highlighted_box_ids": ["p1-b4"]},
 }
 
 
@@ -241,7 +352,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/review", response_class=HTMLResponse)
     async def review_page(request: Request) -> HTMLResponse:
-        return render(request, "review.html", "Review")
+        return templates.TemplateResponse(
+            request,
+            "review.html",
+            {
+                "title": "Review",
+                "active": "/review",
+                "settings": settings,
+                "overlay_data": DEMO_OVERLAY_DATA,
+            },
+        )
 
     @app.get("/export", response_class=HTMLResponse)
     async def export_page(request: Request) -> HTMLResponse:
@@ -261,6 +381,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "results": DEMO_RESULTS,
                     "action": "/api/demo/export",
                 },
+            },
+        )
+
+    @app.get("/demo/overlay", response_class=HTMLResponse)
+    async def overlay_demo_page(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "overlay_demo.html",
+            {
+                "title": "Overlay demo",
+                "active": "/review",
+                "settings": settings,
+                "overlay_data": DEMO_OVERLAY_DATA,
             },
         )
 
