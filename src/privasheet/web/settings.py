@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 ENV_KEYS = (
     "PRIVASHEET_HOST",
-    "PORT",
-    "ALLOWED_HOSTS",
-    "DATA_DIR",
-    "BASE_URL",
-    "MODEL",
-    "DOCUMENT_TIMEOUT_S",
+    "PRIVASHEET_PORT",
+    "PRIVASHEET_ALLOWED_HOSTS",
+    "PRIVASHEET_DATA_DIR",
+    "PRIVASHEET_BASE_URL",
+    "PRIVASHEET_MODEL",
+    "PRIVASHEET_DOCUMENT_TIMEOUT_S",
 )
 
 
@@ -34,8 +35,7 @@ class Settings:
 
 
 def _default_data_dir() -> Path:
-    root = Path(__file__).resolve().parents[1]
-    return root / "temp"
+    return Path(sys.prefix) / "temp"
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -64,14 +64,18 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
     values = {key: os.environ.get(key, file_values.get(key)) for key in ENV_KEYS}
 
     host = values["PRIVASHEET_HOST"] or "127.0.0.1"
-    port = int(values["PORT"] or "8000")
+    port = int(values["PRIVASHEET_PORT"] or "8765")
     allowed_hosts = _split_hosts(
-        values["ALLOWED_HOSTS"] or "localhost,127.0.0.1,testserver"
+        values["PRIVASHEET_ALLOWED_HOSTS"] or "127.0.0.1,localhost"
     )
-    data_dir = Path(values["DATA_DIR"]) if values["DATA_DIR"] else _default_data_dir()
-    base_url = values["BASE_URL"] or f"http://{host}:{port}"
-    model = values["MODEL"] or "local"
-    document_timeout_s = int(values["DOCUMENT_TIMEOUT_S"] or "120")
+    data_dir = (
+        Path(values["PRIVASHEET_DATA_DIR"])
+        if values["PRIVASHEET_DATA_DIR"]
+        else _default_data_dir()
+    )
+    base_url = values["PRIVASHEET_BASE_URL"] or f"http://{host}:{port}"
+    model = values["PRIVASHEET_MODEL"] or "local"
+    document_timeout_s = int(values["PRIVASHEET_DOCUMENT_TIMEOUT_S"] or "600")
 
     return Settings(
         host=host,

@@ -1,5 +1,5 @@
 /**
- * Bootstrap modal confirm(message) -> Promise<boolean>.
+ * Bootstrap modal confirmDialog(message) -> Promise<boolean>.
  */
 (function () {
   "use strict";
@@ -36,7 +36,7 @@
     okButton = modalElement.querySelector("[data-confirm-ok]");
   }
 
-  window.confirm = function confirm(message) {
+  window.confirmDialog = function confirmDialog(message) {
     ensureModal();
     messageElement.textContent = message;
 
@@ -72,7 +72,7 @@
 
     event.preventDefault();
     const message = form.dataset.confirmMessage || "Delete this item?";
-    if (await window.confirm(message)) {
+    if (await window.confirmDialog(message)) {
       form.dataset.confirmed = "true";
       form.requestSubmit();
     }

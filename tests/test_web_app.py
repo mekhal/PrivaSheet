@@ -1,6 +1,8 @@
 import asyncio
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from privasheet.web.app import create_app
 from privasheet.web.settings import Settings, load_settings
 
@@ -13,13 +15,15 @@ class AsgiResponse:
         self.text = body.decode("utf-8", errors="replace")
 
 
-async def _asgi_request(app, method, path, headers=None):
+async def _asgi_request(client, method, path, headers=None):
     response = {"status": None, "headers": {}, "body": bytearray()}
     request_sent = False
+    disconnect = asyncio.Event()
 
     async def receive():
         nonlocal request_sent
         if request_sent:
+            await disconnect.wait()
             return {"type": "http.disconnect"}
         request_sent = True
         return {"type": "http.request", "body": b"", "more_body": False}
@@ -33,17 +37,16 @@ async def _asgi_request(app, method, path, headers=None):
             }
         elif message["type"] == "http.response.body":
             response["body"].extend(message.get("body", b""))
+            if not message.get("more_body", False):
+                disconnect.set()
 
-    input_headers = headers or {}
-    raw_headers = (
-        []
-        if "host" in {key.lower() for key in input_headers}
-        else [(b"host", b"testserver")]
-    )
-    for key, value in input_headers.items():
-        raw_headers.append((key.lower().encode("latin-1"), value.encode("latin-1")))
+    input_headers = {"host": "testserver", **(headers or {})}
+    raw_headers = [
+        (key.lower().encode("latin-1"), value.encode("latin-1"))
+        for key, value in input_headers.items()
+    ]
 
-    await app(
+    await client.app(
         {
             "type": "http",
             "asgi": {"version": "3.0", "spec_version": "2.4"},
@@ -65,26 +68,28 @@ async def _asgi_request(app, method, path, headers=None):
     )
 
 
-def request(app, method, path, headers=None):
-    return asyncio.run(_asgi_request(app, method, path, headers))
+def request(client, method, path, headers=None):
+    # The installed Starlette/httpx stack hangs in TestClient.get/post here, so
+    # keep TestClient construction while driving its ASGI app directly.
+    return asyncio.run(_asgi_request(client, method, path, headers))
 
 
-def make_app(**overrides):
+def make_client(**overrides):
     settings = Settings(
         host="127.0.0.1",
-        port=8000,
+        port=8765,
         allowed_hosts=("testserver", "example.test"),
         data_dir=Path("/tmp/privasheet-test"),
-        base_url="http://testserver",
+        base_url="http://example.test",
         model="test-model",
         document_timeout_s=30,
     )
     settings = settings.model_copy(update=overrides)
-    return create_app(settings)
+    return TestClient(create_app(settings))
 
 
 def test_pages_render_with_base_layout_and_nav():
-    app = make_app()
+    client = make_client()
 
     for path, title in [
         ("/", "Templates"),
@@ -93,7 +98,7 @@ def test_pages_render_with_base_layout_and_nav():
         ("/review", "Review"),
         ("/export", "Export"),
     ]:
-        response = request(app, "GET", path)
+        response = request(client, "GET", path)
 
         assert response.status_code == 200
         assert title in response.text
@@ -104,10 +109,10 @@ def test_pages_render_with_base_layout_and_nav():
 
 
 def test_static_vendor_and_app_assets_are_served():
-    app = make_app()
+    client = make_client()
 
     static_route = next(
-        route for route in app.routes if getattr(route, "path", "") == "/static"
+        route for route in client.app.routes if getattr(route, "path", "") == "/static"
     )
     static_dir = Path(static_route.app.directory)
     bootstrap = static_dir / "vendor" / "bootstrap" / "bootstrap.min.css"
@@ -119,7 +124,7 @@ def test_static_vendor_and_app_assets_are_served():
 
 
 def test_security_headers_are_set():
-    response = request(make_app(), "GET", "/")
+    response = request(make_client(), "GET", "/")
 
     assert response.headers["content-security-policy"] == (
         "default-src 'self'; script-src 'self'; style-src 'self'; "
@@ -131,32 +136,46 @@ def test_security_headers_are_set():
 
 
 def test_host_allowlist_rejects_unknown_hosts():
-    app = make_app()
+    client = make_client()
 
-    response = request(app, "GET", "/", headers={"host": "attacker.test"})
+    response = request(client, "GET", "/", headers={"host": "attacker.test"})
 
     assert response.status_code == 403
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
 def test_state_changing_requests_require_allowed_origin():
-    app = make_app()
+    client = make_client()
 
     accepted = request(
-        app,
+        client,
         "POST",
         "/templates/delete",
         headers={"origin": "http://example.test"},
     )
     rejected = request(
-        app,
+        client,
         "POST",
         "/templates/delete",
         headers={"origin": "http://evil.test"},
     )
+    wrong_port = request(
+        client,
+        "POST",
+        "/templates/delete",
+        headers={"origin": "http://example.test:9999"},
+    )
+    wrong_scheme = request(
+        client,
+        "POST",
+        "/templates/delete",
+        headers={"origin": "https://example.test"},
+    )
 
     assert accepted.status_code == 303
     assert rejected.status_code == 403
+    assert wrong_port.status_code == 403
+    assert wrong_scheme.status_code == 403
     assert rejected.headers["content-security-policy"].startswith("default-src 'self'")
 
 
@@ -166,17 +185,17 @@ def test_settings_load_env_file_with_environment_overrides(tmp_path, monkeypatch
         "\n".join(
             [
                 "PRIVASHEET_HOST=0.0.0.0",
-                "PORT=8123",
-                "ALLOWED_HOSTS=localhost, example.test",
-                f"DATA_DIR={tmp_path / 'data'}",
-                "BASE_URL=https://example.test",
-                "MODEL=env-model",
-                "DOCUMENT_TIMEOUT_S=45",
+                "PRIVASHEET_PORT=8123",
+                "PRIVASHEET_ALLOWED_HOSTS=localhost, example.test",
+                f"PRIVASHEET_DATA_DIR={tmp_path / 'data'}",
+                "PRIVASHEET_BASE_URL=https://example.test",
+                "PRIVASHEET_MODEL=env-model",
+                "PRIVASHEET_DOCUMENT_TIMEOUT_S=45",
             ],
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("MODEL", "override-model")
+    monkeypatch.setenv("PRIVASHEET_MODEL", "override-model")
 
     settings = load_settings(env_file)
 
@@ -192,16 +211,18 @@ def test_settings_load_env_file_with_environment_overrides(tmp_path, monkeypatch
 def test_settings_default_data_dir_is_installation_adjacent_temp(tmp_path, monkeypatch):
     for key in [
         "PRIVASHEET_HOST",
-        "PORT",
-        "ALLOWED_HOSTS",
-        "DATA_DIR",
-        "BASE_URL",
-        "MODEL",
-        "DOCUMENT_TIMEOUT_S",
+        "PRIVASHEET_PORT",
+        "PRIVASHEET_ALLOWED_HOSTS",
+        "PRIVASHEET_DATA_DIR",
+        "PRIVASHEET_BASE_URL",
+        "PRIVASHEET_MODEL",
+        "PRIVASHEET_DOCUMENT_TIMEOUT_S",
     ]:
         monkeypatch.delenv(key, raising=False)
 
     settings = load_settings(tmp_path / "missing.env")
 
+    assert settings.port == 8765
+    assert settings.allowed_hosts == ("127.0.0.1", "localhost")
     assert settings.data_dir.name == "temp"
-    assert settings.data_dir.parent.name == "privasheet"
+    assert settings.document_timeout_s == 600
