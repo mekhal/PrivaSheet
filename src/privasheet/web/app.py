@@ -33,40 +33,30 @@ class LocalStaticFiles:
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
             return
-
         if scope["method"] not in {"GET", "HEAD"}:
-            await self._send_plain(send, 405, b"Method Not Allowed")
-            return
+            return await self._send(send, 405, b"Method Not Allowed", "text/plain")
 
-        root_path = scope.get("root_path", "")
         path = unquote(scope.get("path", ""))
-        if root_path and path.startswith(root_path):
-            path = path[len(root_path) :]
-        path = path.lstrip("/")
-        if "\x00" in path:
-            await self._send_plain(send, 404, b"Not Found")
-            return
+        root_path = scope.get("root_path", "")
+        path = path.removeprefix(root_path).lstrip("/")
         file_path = (self.directory / path).resolve()
-
-        if self.directory not in file_path.parents or not file_path.is_file():
-            await self._send_plain(send, 404, b"Not Found")
-            return
+        if (
+            "\x00" in path
+            or self.directory not in file_path.parents
+            or not file_path.is_file()
+        ):
+            return await self._send(send, 404, b"Not Found", "text/plain")
 
         body = b"" if scope["method"] == "HEAD" else file_path.read_bytes()
         media_type = (
             mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         )
+        await self._send(send, 200, body, media_type, file_path.stat().st_size)
+
+    async def _send(self, send, status_code, body, media_type, length=None) -> None:
         headers = [
             (b"content-type", media_type.encode("latin-1")),
-            (b"content-length", str(file_path.stat().st_size).encode("latin-1")),
-        ]
-        await send({"type": "http.response.start", "status": 200, "headers": headers})
-        await send({"type": "http.response.body", "body": body})
-
-    async def _send_plain(self, send, status_code: int, body: bytes) -> None:
-        headers = [
-            (b"content-type", b"text/plain; charset=utf-8"),
-            (b"content-length", str(len(body)).encode("latin-1")),
+            (b"content-length", str(len(body) if length is None else length).encode()),
         ]
         await send(
             {"type": "http.response.start", "status": status_code, "headers": headers}
