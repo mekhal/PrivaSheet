@@ -27,10 +27,18 @@ def prompt_lines(snapshot: dict) -> list[str]:
         for line in page_lines:
             for item in line:
                 result.append(
-                    f"{item['id']} | {page_number} | {_region(item)} | "
+                    f"{item['id']} | {page_number} | {region(item)} | "
                     f"{item.get('text', '')}"
                 )
     return result
+
+
+def region(box: dict) -> str:
+    """Return the nine-zone region containing the centre of an OCR box."""
+    x, y = _center(box)
+    column = _third(x)
+    row = _third(y)
+    return _REGIONS[row][column]
 
 
 def _page_lines(boxes: list[dict]) -> list[list[dict]]:
@@ -91,13 +99,6 @@ def _overlaps(first: tuple[float, float], second: tuple[float, float]) -> bool:
 
 def _min_box_id(boxes: list[dict]) -> str:
     return min(str(item["id"]) for item in boxes)
-
-
-def _region(box: dict) -> str:
-    x, y = _center(box)
-    column = _third(x)
-    row = _third(y)
-    return _REGIONS[row][column]
 
 
 def _third(value: float) -> int:
