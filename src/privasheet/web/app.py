@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import mimetypes
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.responses import PlainTextResponse
 
+from privasheet.export import ExportNotAllowed, build_jsonl, export_filename
 from privasheet.web.settings import Settings, load_settings
 
 STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -23,6 +25,98 @@ SECURITY_HEADERS = {
     ),
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
+}
+
+DEMO_TEMPLATE = {
+    "template_id": "demo-invoice",
+    "version": 1,
+    "fields": [{"key": "invoice_no"}, {"key": "date"}, {"key": "total"}],
+    "tables": [
+        {
+            "key": "line_items",
+            "columns": [{"key": "description"}, {"key": "amount"}],
+        }
+    ],
+}
+DEMO_MANIFEST = {
+    "batch_id": "demo_batch",
+    "template": {"id": "demo-invoice", "version": 1},
+    "documents": [
+        {
+            "document_id": "doc_passed",
+            "result_id": "res_passed",
+            "source_file": "synthetic_invoice_001.pdf",
+        },
+        {
+            "document_id": "doc_reviewed",
+            "result_id": "res_reviewed",
+            "source_file": "synthetic_invoice_002.pdf",
+        },
+        {
+            "document_id": "doc_needs_review",
+            "result_id": "res_needs_review",
+            "source_file": "synthetic_invoice_003.pdf",
+        },
+        {
+            "document_id": "doc_failed",
+            "result_id": "res_failed",
+            "source_file": "synthetic_invoice_004.pdf",
+        },
+    ],
+}
+DEMO_RESULTS = {
+    "res_passed": {
+        "status": "passed",
+        "extracted": {
+            "fields": {
+                "invoice_no": {"value": "INV-1001"},
+                "date": {"value": "2026-09-18"},
+                "total": {"value": "125.00"},
+            },
+            "tables": {
+                "line_items": [
+                    {
+                        "description": {"value": "Synthetic service"},
+                        "amount": {"value": "125.00"},
+                    }
+                ]
+            },
+        },
+        "review": None,
+    },
+    "res_reviewed": {
+        "status": "reviewed",
+        "extracted": {
+            "fields": {
+                "invoice_no": {"value": "INV-1002"},
+                "date": {"value": "2026-09-19"},
+                "total": {"value": "240.00"},
+            },
+            "tables": {},
+        },
+        "review": {
+            "fields": {
+                "invoice_no": "INV-1002",
+                "date": "2026-09-19",
+                "total": "245.00",
+            },
+            "tables": {
+                "line_items": [
+                    {"description": "Reviewed synthetic service", "amount": "245.00"}
+                ]
+            },
+        },
+    },
+    "res_needs_review": {
+        "status": "needs_review",
+        "extracted": {"fields": {}, "tables": {}},
+        "review": None,
+    },
+    "res_failed": {
+        "status": "failed",
+        "extracted": {"fields": {}, "tables": {}},
+        "review": None,
+    },
 }
 
 
@@ -152,5 +246,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/export", response_class=HTMLResponse)
     async def export_page(request: Request) -> HTMLResponse:
         return render(request, "export.html", "Export")
+
+    @app.get("/demo/export", response_class=HTMLResponse)
+    async def export_demo_page(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "export_demo.html",
+            {
+                "title": "Export demo",
+                "active": "/export",
+                "settings": settings,
+                "export_select_data": {
+                    "manifest": DEMO_MANIFEST,
+                    "results": DEMO_RESULTS,
+                    "action": "/api/demo/export",
+                },
+            },
+        )
+
+    @app.post("/api/demo/export")
+    async def export_demo_download(request: Request) -> Response:
+        payload = await request.json()
+        selected_document_ids = payload.get("selected_document_ids", [])
+        try:
+            text = build_jsonl(
+                DEMO_MANIFEST, DEMO_RESULTS, DEMO_TEMPLATE, selected_document_ids
+            )
+        except ExportNotAllowed as error:
+            return PlainTextResponse(str(error), status_code=400)
+        if not text:
+            return JSONResponse(
+                {"error": "Select at least one document."}, status_code=400
+            )
+        filename = export_filename(DEMO_MANIFEST["batch_id"], datetime.now(UTC))
+        return Response(
+            text,
+            media_type="application/x-ndjson",
+            headers={"content-disposition": f'attachment; filename="{filename}"'},
+        )
 
     return app

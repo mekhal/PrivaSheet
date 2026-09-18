@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block content %}
+<div class="d-flex align-items-start justify-content-between gap-3 mb-3">
+  <div>
+    <h1 class="h3">Export demo</h1>
+    <p class="text-body-secondary mb-0">Choose passed or reviewed documents to download as JSONL.</p>
+  </div>
+</div>
+
+<div id="exportSelectRoot"></div>
+<script id="exportSelectData" type="application/json">{{ export_select_data | tojson }}</script>
+<script type="module" src="{{ url_for('static', path='/app/export-select.js') }}"></script>
+{% endblock %}
