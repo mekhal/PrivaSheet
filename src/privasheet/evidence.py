@@ -66,8 +66,11 @@ def _validate_entry(entry: object, boxes: dict[str, dict], target: str) -> list[
                     )
             if duplicate:
                 errors.append(f"{target}.box_ids must not contain duplicates")
-        if not isinstance(entry.get("span"), str):
+        span = entry.get("span")
+        if not isinstance(span, str):
             errors.append(f"{target}.span must be a string")
+        elif not span:
+            errors.append(f"{target}.span must be non-empty")
         return errors
 
     if missing:
