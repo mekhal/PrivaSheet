@@ -1058,3 +1058,36 @@ the smallest change and add or extend the unit test in the file that owns it (th
 paths for exactly that). List each such fix in the commit body. Do not weaken or delete any existing test. If a fix
 would need a change outside the allowed paths (for example in extractor.py or validate), stop and explain instead.
 """
+
+# Work set D: packaging (maintainer decision 2026-09-19).
+
+[[task]]
+id = "DEP-01"
+title = "packaging: declare the OCR engine as a dependency"
+tier = "green"
+review = "joint"
+paths = ["pyproject.toml", "README.md", "tests/test_packaging.py"]
+depends_on = []
+body = """
+Installing PrivaSheet with `pip install -e .` leaves it unable to read a single document: `rapidocr` and
+`onnxruntime` are imported by src/privasheet/ocr/engine.py but are not in [project] dependencies, so the first
+upload fails with OCR_FAILED "Missing OCR package rapidocr". README.md works around this with a separate
+`pip install rapidocr onnxruntime` line. The maintainer decided the dependency belongs in the project, because a
+declared version is one we control.
+
+- Add `rapidocr` and `onnxruntime` to [project] dependencies in pyproject.toml, with a lower bound each.
+  Verified working together on Windows and in this environment: rapidocr 3.9.2 with onnxruntime 1.30.0, whose
+  wheel also brings numpy. Pin the lower bound at those versions. rapidocr 3.x is what the adapter is written
+  against: its params keys are "Section.key" (Global.use_cls, Det.model_path, ...), which 2.x does not accept.
+- numpy is imported by the same adapter but arrives through onnxruntime. Declare it as well rather than relying
+  on that, with the lower bound onnxruntime already implies.
+- tests/test_packaging.py: read pyproject.toml with tomllib and assert that every third-party module imported by
+  src/privasheet/**, at module level or inside a function, has a matching entry in [project] dependencies. Drive
+  it from the source, not from a hard-coded list, so a future import cannot be forgotten. Standard library
+  modules and first-party `privasheet` imports are excluded.
+- README.md: remove the separate "Then add the OCR engine" step and its paragraph from the installation steps, so
+  `pip install -e .` is the only install command again. Keep the troubleshooting row for the OCR error: an
+  environment installed before this change still hits it. Change nothing else in README.md.
+- The OCR models ship inside the rapidocr wheel (rapidocr/models/*.onnx) and the adapter finds them there, so this
+  adds no model download and nothing is fetched at run time. Do not add any model download step.
+"""
