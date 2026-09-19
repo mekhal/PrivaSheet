@@ -67,7 +67,7 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
         if values["PRIVASHEET_DATA_DIR"]
         else _default_data_dir()
     )
-    base_url = values["PRIVASHEET_BASE_URL"] or f"http://{host}:{port}"
+    base_url = values["PRIVASHEET_BASE_URL"] or "http://127.0.0.1:11434"
     model = values["PRIVASHEET_MODEL"] or "local"
     document_timeout_s = int(values["PRIVASHEET_DOCUMENT_TIMEOUT_S"] or "600")
 
