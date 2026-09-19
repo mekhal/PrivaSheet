@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from PIL import Image
 
@@ -72,26 +75,58 @@ class RapidOcrEngine:
 
     name = "rapidocr"
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        model_dir: str | Path | None = None,
+        data_dir: str | Path | None = None,
+        config: Mapping[str, Any] | None = None,
+    ):
         try:
             rapidocr = importlib.import_module("rapidocr")
-            self._numpy = importlib.import_module("numpy")
-        except Exception as exc:
-            package = "rapidocr" if "rapidocr" in str(exc).lower() else "numpy"
+        except ImportError as exc:
+            package = exc.name or "rapidocr"
             raise OcrError(
                 "OCR_FAILED", f"Missing OCR package {package}: {exc}."
+            ) from exc
+        except Exception as exc:
+            raise OcrError(
+                "OCR_FAILED", f"Could not import OCR package rapidocr: {exc}."
+            ) from exc
+
+        try:
+            self._numpy = importlib.import_module("numpy")
+        except ImportError as exc:
+            package = exc.name or "numpy"
+            raise OcrError(
+                "OCR_FAILED", f"Missing OCR package {package}: {exc}."
+            ) from exc
+        except Exception as exc:
+            raise OcrError(
+                "OCR_FAILED", f"Could not import OCR package numpy: {exc}."
             ) from exc
 
         self.version = str(getattr(rapidocr, "__version__", "unknown"))
         try:
+            effective_config = dict(config or {})
+            model_paths = _resolve_model_paths(rapidocr, model_dir, data_dir)
+            engine_params = {
+                **effective_config,
+                **_rapidocr_model_params(model_paths),
+                "download": False,
+            }
             engine_class = rapidocr.RapidOCR
-            self._engine = engine_class()
-            self._models = _loaded_model_digests(self._engine, rapidocr)
+            self._engine = engine_class(**engine_params)
+            self._models = _model_digests(model_paths.values())
             if not self._models:
-                raise OcrError(
-                    "OCR_FAILED", "RapidOCR did not report any loaded model files."
-                )
-            self.config_sha256 = _config_sha256(self._models)
+                raise OcrError("OCR_FAILED", "RapidOCR did not load any model files.")
+            self.config_sha256 = _config_sha256(
+                self._models,
+                {
+                    "download": False,
+                    "options": effective_config,
+                },
+            )
         except OcrError:
             raise
         except Exception as exc:
@@ -115,62 +150,105 @@ class RapidOcrEngine:
             ) from exc
 
 
-def make_rapidocr_engine() -> RapidOcrEngine:
+def make_rapidocr_engine(
+    *,
+    model_dir: str | Path | None = None,
+    data_dir: str | Path | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> RapidOcrEngine:
     """Default OCR engine factory."""
 
-    return RapidOcrEngine()
+    return RapidOcrEngine(model_dir=model_dir, data_dir=data_dir, config=config)
 
 
-def _loaded_model_digests(engine, rapidocr_module) -> list[dict[str, str]]:
-    model_paths = sorted(_iter_model_paths(engine, rapidocr_module))
+def _model_digests(model_paths) -> list[dict[str, str]]:
+    model_paths = sorted({Path(path).resolve() for path in model_paths})
     return [{"name": path.name, "sha256": _file_sha256(path)} for path in model_paths]
 
 
-def _iter_model_paths(engine, rapidocr_module) -> set[Path]:
-    package_roots = _allowed_model_roots(rapidocr_module)
-    paths = set()
-    _collect_paths(engine, paths, set())
-    return {
-        path
-        for path in paths
-        if path.is_file()
-        and path.suffix.lower() in {".onnx", ".bin", ".param", ".pdiparams", ".pth"}
-        and _is_relative_to_any(path.resolve(), package_roots)
-    }
+def _resolve_model_paths(
+    rapidocr_module,
+    model_dir: str | Path | None,
+    data_dir: str | Path | None,
+) -> dict[str, Path]:
+    roots = _allowed_model_roots(rapidocr_module, model_dir, data_dir)
+    candidates = sorted(
+        path for root in roots for path in root.rglob("*") if _is_model_file(path)
+    )
+    by_role: dict[str, Path] = {}
+    for path in candidates:
+        role = _model_role(path)
+        if role and role not in by_role:
+            by_role[role] = path.resolve()
+
+    missing = [role for role in ("det", "rec") if role not in by_role]
+    if missing:
+        searched = ", ".join(str(root) for root in roots) or "no model roots"
+        raise OcrError(
+            "OCR_FAILED",
+            f"Missing OCR model {', '.join(missing)} under {searched}.",
+        )
+    return by_role
 
 
-def _allowed_model_roots(rapidocr_module) -> tuple[Path, ...]:
+def _allowed_model_roots(
+    rapidocr_module,
+    model_dir: str | Path | None,
+    data_dir: str | Path | None,
+) -> tuple[Path, ...]:
     roots = []
     module_file = getattr(rapidocr_module, "__file__", None)
     if module_file:
         roots.append(Path(module_file).resolve().parent)
-    return tuple(dict.fromkeys(roots))
+    for directory in (model_dir, data_dir, _default_data_dir()):
+        if directory is not None:
+            roots.append(Path(directory).resolve())
+    return tuple(dict.fromkeys(root for root in roots if root.exists()))
 
 
-def _collect_paths(value, paths: set[Path], seen: set[int]) -> None:
-    value_id = id(value)
-    if value_id in seen:
-        return
-    seen.add(value_id)
+def _default_data_dir() -> Path | None:
+    raw = os.environ.get("PRIVASHEET_DATA_DIR")
+    if not raw:
+        return None
+    return Path(raw)
 
-    if isinstance(value, str | Path):
-        paths.add(Path(value))
-        return
+
+def _is_model_file(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in {
+        ".onnx",
+        ".bin",
+        ".param",
+        ".pdiparams",
+        ".pth",
+    }
+
+
+def _model_role(path: Path) -> str | None:
+    name = path.name.lower()
+    if "det" in name:
+        return "det"
+    if "rec" in name:
+        return "rec"
+    if "cls" in name:
+        return "cls"
+    return None
+
+
+def _rapidocr_model_params(model_paths: dict[str, Path]) -> dict[str, str]:
+    params = {}
+    for role, path in model_paths.items():
+        params[f"{role}_model_path"] = str(path)
+    return params
+
+
+def _serialize_config(value):
+    if isinstance(value, Path):
+        return str(value)
     if isinstance(value, dict):
-        for item in value.values():
-            _collect_paths(item, paths, seen)
-        return
+        return {str(key): _serialize_config(item) for key, item in value.items()}
     if isinstance(value, list | tuple | set):
-        for item in value:
-            _collect_paths(item, paths, seen)
-        return
-    if hasattr(value, "__dict__"):
-        for item in vars(value).values():
-            _collect_paths(item, paths, seen)
-
-
-def _is_relative_to_any(path: Path, roots: tuple[Path, ...]) -> bool:
-    return any(path.is_relative_to(root) for root in roots)
+        return [_serialize_config(item) for item in value]
+    return value
 
 
 def _file_sha256(path: Path) -> str:
@@ -181,11 +259,10 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _config_sha256(models: list[dict[str, str]]) -> str:
-    digest = hashlib.sha256()
-    for model in models:
-        digest.update(model["name"].encode())
-        digest.update(b"\0")
-        digest.update(model["sha256"].encode())
-        digest.update(b"\0")
-    return digest.hexdigest()
+def _config_sha256(models: list[dict[str, str]], config: Mapping[str, Any]) -> str:
+    payload = {
+        "config": _serialize_config(dict(config)),
+        "models": sorted(models, key=lambda model: model["name"]),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()

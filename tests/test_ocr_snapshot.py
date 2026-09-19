@@ -83,6 +83,14 @@ def test_normalize_boxes_numbers_each_page_independently():
     assert [box["id"] for box in page_2] == ["p2-b0000"]
 
 
+def test_normalize_boxes_rejects_non_positive_dimensions():
+    with pytest.raises(OcrError) as excinfo:
+        normalize_boxes(1, 0, 100, [raw_box("A")])
+
+    assert excinfo.value.code == "OCR_FAILED"
+    assert "page dimensions" in excinfo.value.detail
+
+
 def test_compute_snapshot_id_is_stable_and_sensitive_to_inputs():
     page_1 = Image.new("RGB", (2, 1), "white")
     page_2 = Image.new("RGB", (1, 2), "black")
