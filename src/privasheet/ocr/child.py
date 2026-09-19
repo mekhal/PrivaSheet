@@ -25,7 +25,7 @@ def run_child(conn, path, kind, limits, out_dir, engine: str) -> None:
         conn.send(("result", result))
     except IngestError as exc:
         conn.send(("error", DOCUMENT_UNREADABLE, _safe_document_detail(exc)))
-    except (UnidentifiedImageError, OSError, ValueError) as exc:
+    except _DocumentDecodeError as exc:
         conn.send(("error", DOCUMENT_UNREADABLE, _safe_decode_detail(exc)))
     except OcrError as exc:
         conn.send(("error", OCR_FAILED, _safe_ocr_detail(exc)))
@@ -36,7 +36,7 @@ def run_child(conn, path, kind, limits, out_dir, engine: str) -> None:
 
 
 def _run_job(path, kind, limits, out_dir, engine_ref: str, conn) -> dict[str, Any]:
-    pages = render_pages(path, kind, limits)
+    pages = _render_pages(path, kind, limits)
     total = len(pages)
     for page_number in range(1, total + 1):
         conn.send(("progress", "render", page_number, total))
@@ -72,6 +72,19 @@ def _run_job(path, kind, limits, out_dir, engine_ref: str, conn) -> dict[str, An
         "engine": _engine_info(engine),
         "pages": normalized_pages,
     }
+
+
+class _DocumentDecodeError(Exception):
+    """Decode failure raised only while rendering the source document."""
+
+
+def _render_pages(path, kind, limits):
+    try:
+        return render_pages(path, kind, limits)
+    except IngestError:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise _DocumentDecodeError(type(exc).__name__) from exc
 
 
 def _load_engine(engine_ref: str):
