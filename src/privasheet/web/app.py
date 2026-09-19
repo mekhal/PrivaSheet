@@ -240,48 +240,18 @@ DEMO_REVIEW_DATA = {
         "revision": 1,
         "schema": {
             "fields": [
-                {
-                    "key": "invoice_no",
-                    "label": "Invoice number",
-                    "type": "string",
-                    "required": True,
-                },
-                {
-                    "key": "date",
-                    "label": "Date",
-                    "type": "date",
-                    "required": True,
-                },
-                {
-                    "key": "total",
-                    "label": "Total",
-                    "type": "decimal",
-                    "required": True,
-                },
-                {
-                    "key": "tax",
-                    "label": "Tax",
-                    "type": "decimal",
-                    "required": False,
-                },
+                {"key": "invoice_no", "type": "string", "required": True},
+                {"key": "date", "label": "Date", "type": "date", "required": True},
+                {"key": "total", "label": "Total", "type": "decimal", "required": True},
+                {"key": "tax", "label": "Tax", "type": "decimal", "required": False},
             ],
             "tables": [
                 {
                     "key": "line_items",
                     "label": "Line items",
                     "columns": [
-                        {
-                            "key": "description",
-                            "label": "Description",
-                            "type": "string",
-                            "required": True,
-                        },
-                        {
-                            "key": "amount",
-                            "label": "Amount",
-                            "type": "decimal",
-                            "required": True,
-                        },
+                        {"key": "description", "type": "string", "required": True},
+                        {"key": "amount", "type": "decimal", "required": True},
                     ],
                 }
             ],
@@ -511,7 +481,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def review_demo_page(request: Request) -> HTMLResponse:
         return templates.TemplateResponse(
             request,
-            "review_demo.html",
+            "review.html",
             {
                 "title": "Review demo",
                 "active": "/review",
