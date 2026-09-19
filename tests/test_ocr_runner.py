@@ -99,7 +99,8 @@ def test_two_page_tiff_reports_progress_for_both_pages(tmp_path):
         on_progress=lambda stage, page, total: progress.append((stage, page, total)),
     )
 
-    assert [item for item in progress if item[0] == "render"] == [
+    assert progress[0] == ("render", 0, 0)
+    assert [item for item in progress if item[0] == "render" and item[1] > 0] == [
         ("render", 1, 2),
         ("render", 2, 2),
     ]
@@ -112,6 +113,7 @@ def test_two_page_tiff_reports_progress_for_both_pages(tmp_path):
 def test_sleeping_engine_hits_budget_and_child_is_dead(tmp_path):
     path = tmp_path / "page.png"
     Image.new("RGB", (20, 10), "white").save(path)
+    progress = []
 
     with pytest.raises(OcrTimeout) as excinfo:
         run_ocr_job(
@@ -121,14 +123,15 @@ def test_sleeping_engine_hits_budget_and_child_is_dead(tmp_path):
             tmp_path / "ocr",
             timeout_s=1,
             engine=SLEEPING_ENGINE,
+            on_progress=lambda stage, page, total: progress.append(
+                (stage, page, total)
+            ),
         )
 
-    # The 1 second budget includes spawn start-up and child imports, so a very
-    # slow machine may time out before the child reports page progress.
-    if excinfo.value.stage is not None:
-        assert excinfo.value.stage == "ocr"
-        assert excinfo.value.page == 1
-        assert excinfo.value.total == 1
+    assert ("ocr", 1, 1) in progress
+    assert excinfo.value.stage == "ocr"
+    assert excinfo.value.page == 1
+    assert excinfo.value.total == 1
     assert excinfo.value.elapsed_s >= 1
 
 
@@ -268,3 +271,4 @@ def test_engine_with_no_boxes_gives_ocr_failed(tmp_path):
         )
 
     assert excinfo.value.code == "OCR_FAILED"
+    assert excinfo.value.detail == "Document contains no OCR boxes."
