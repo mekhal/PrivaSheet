@@ -559,6 +559,31 @@ confirm modal. Uses box-overlay for the page image.
   that asserts it "initial draft reads canonical editable values" while asserting a non-canonical one.
 - The OCR text on the page image and in spans keeps its separators ("Total 1,284.00"): that is the raw
   document text the overlay shows, and it is correct as it is.
+- Status transitions. Attempt 1 got these wrong; the Human decided the Cancel rule, the rest is spec 4.3:
+  - Save always sets the status to `needs_review` — from `passed`, `reviewed`, `rejected` and `needs_review` alike.
+    `status: nextStatus || result.status` left an edited `passed` or `reviewed` document on its old status, and an
+    edited `rejected` one could then never be marked reviewed again.
+  - Add a Cancel button beside Save. It is the way to leave the editor without changing the status: it drops the
+    draft, restores the stored values, and leaves `status` and `review` untouched. There is no Cancel today.
+  - `canMarkReviewed` is true only for `needs_review`. From `passed` the path is Edit → Save → needs_review →
+    Mark reviewed.
+  - Node tests: Save from passed, reviewed, rejected and needs_review each ends in `needs_review` with editing still
+    enabled and `canMarkReviewed` true; Cancel leaves status, stored values and `review` unchanged.
+- Mark rejected is "the same kind of request" as Mark reviewed (spec 4.3) and it persists the draft, so it needs the
+  same preconditions: a valid canonical draft and every issue acknowledged. Attempt 1 had
+  `canReject: status !== "rejected"`, which wrote invalid values into `review`. Update the test that asserts
+  `actionState('needs_review', false, ['bad'], false).canReject === true`.
+- The review payload is the JSON contract with the backend, so build it the way the backend reads it:
+  - A blank optional value becomes `null`, not "". In a review `null` means "not on the document" (spec 4.3), and
+    check_review rejects "" for an optional decimal or date as non-canonical. A blank required value stays a
+    validation issue, as today.
+  - `acknowledged` is `{ "revision": n, "issues": [...] }`. Attempt 1 wrote `{ "issues": [...] }` with no revision,
+    although the fixture already carries `"revision": 1`. Take the revision from the result.
+  - Node tests for an optional decimal blank and an optional date blank.
+- Testing scope (Human decision — do not report it as a gap): node tests cover the logic in review-editor-logic.mjs,
+  which is the part reused across screens. A behavioural test of the React component is not required, and neither are
+  tests for labels, colours or other presentation details. Keep the existing "react entry" source check as wiring
+  evidence only, not as proof of behaviour.
 """
 
 [[task]]
