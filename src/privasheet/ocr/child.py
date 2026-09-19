@@ -36,6 +36,7 @@ def run_child(conn, path, kind, limits, out_dir, engine: str) -> None:
 
 
 def _run_job(path, kind, limits, out_dir, engine_ref: str, conn) -> dict[str, Any]:
+    conn.send(("progress", "render", 0, 0))
     pages = _render_pages(path, kind, limits)
     total = len(pages)
     for page_number in range(1, total + 1):
@@ -64,7 +65,7 @@ def _run_job(path, kind, limits, out_dir, engine_ref: str, conn) -> dict[str, An
         )
 
     if not any_boxes:
-        raise OcrError(OCR_FAILED, "Document contains no OCR boxes.")
+        raise _SafeOcrError(OCR_FAILED, "Document contains no OCR boxes.")
 
     snapshot_id = compute_snapshot_id(pages, engine)
     return {
@@ -76,6 +77,10 @@ def _run_job(path, kind, limits, out_dir, engine_ref: str, conn) -> dict[str, An
 
 class _DocumentDecodeError(Exception):
     """Decode failure raised only while rendering the source document."""
+
+
+class _SafeOcrError(OcrError):
+    """OCR error whose detail is authored by this module and safe to forward."""
 
 
 def _render_pages(path, kind, limits):
@@ -90,7 +95,9 @@ def _render_pages(path, kind, limits):
 def _load_engine(engine_ref: str):
     module_name, separator, callable_name = engine_ref.partition(":")
     if not separator or not module_name or not callable_name:
-        raise OcrError(OCR_FAILED, "OCR engine must be specified as module:callable.")
+        raise _SafeOcrError(
+            OCR_FAILED, "OCR engine must be specified as module:callable."
+        )
 
     try:
         module = importlib.import_module(module_name)
@@ -101,7 +108,7 @@ def _load_engine(engine_ref: str):
     except OcrError:
         raise
     except Exception as exc:
-        raise OcrError(
+        raise _SafeOcrError(
             OCR_FAILED,
             f"Could not initialize OCR engine ({type(exc).__name__}).",
         ) from exc
@@ -125,4 +132,6 @@ def _safe_decode_detail(exc: Exception) -> str:
 
 
 def _safe_ocr_detail(exc: OcrError) -> str:
+    if isinstance(exc, _SafeOcrError):
+        return exc.detail
     return f"OCR failed ({exc.code})."
