@@ -1,0 +1,120 @@
+"""Startup recovery for interrupted pipeline work."""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+from pathlib import Path
+
+from privasheet.store import repo as store_repo
+
+from .datadir import DataDir, DataDirError
+
+_COUNTS = ("reset_results", "corrected_paths", "removed_files", "removed_dirs")
+
+
+def recover(conn: sqlite3.Connection, datadir: DataDir, now: str) -> dict[str, int]:
+    """Repair interrupted work and prune unreferenced managed files."""
+    counts = dict.fromkeys(_COUNTS, 0)
+    counts["reset_results"] = len(store_repo.reset_processing_to_queued(conn, now))
+    counts["corrected_paths"] = _correct_archived_document_paths(conn, datadir)
+    removed_files, removed_dirs = _remove_orphans(conn, datadir)
+    counts["removed_files"] = removed_files
+    counts["removed_dirs"] = removed_dirs
+    return counts
+
+
+def _correct_archived_document_paths(conn: sqlite3.Connection, datadir: DataDir) -> int:
+    corrected = 0
+    rows = conn.execute(
+        "SELECT document_id, path FROM documents "
+        "WHERE path IS NOT NULL AND path LIKE 'process/%' "
+        "ORDER BY document_id ASC"
+    ).fetchall()
+    for row in rows:
+        old_path = row["path"]
+        archive_path = datadir.archive / Path(old_path).name
+        if archive_path.is_file() and not archive_path.is_symlink():
+            store_repo.update_document_path(
+                conn, row["document_id"], datadir.rel(archive_path)
+            )
+            corrected += 1
+    return corrected
+
+
+def _remove_orphans(conn: sqlite3.Connection, datadir: DataDir) -> tuple[int, int]:
+    referenced = _referenced_paths(conn, datadir)
+    managed_roots = (datadir.process, datadir.archive, datadir.pages)
+    removed_files = 0
+    removed_dirs = 0
+
+    for root in managed_roots:
+        if not root.exists():
+            continue
+        for current, dirs, files in os.walk(root, topdown=False, followlinks=False):
+            current_path = Path(current)
+            for name in files:
+                path = current_path / name
+                if _remove_file_if_orphan(path, root, referenced, datadir):
+                    removed_files += 1
+            for name in dirs:
+                path = current_path / name
+                if path.is_symlink():
+                    if _remove_file_if_orphan(path, root, referenced, datadir):
+                        removed_files += 1
+                    continue
+                if (
+                    root == datadir.pages or datadir.pages in path.parents
+                ) and _remove_empty_page_dir(path, referenced, datadir):
+                    removed_dirs += 1
+    return removed_files, removed_dirs
+
+
+def _referenced_paths(conn: sqlite3.Connection, datadir: DataDir) -> set[Path]:
+    referenced: set[Path] = set()
+    for stored in store_repo.referenced_file_paths(conn):
+        try:
+            path = datadir.resolve(stored)
+        except DataDirError:
+            continue
+        if _is_in_managed_dir(path, datadir):
+            referenced.add(path)
+    return referenced
+
+
+def _remove_file_if_orphan(
+    path: Path, managed_root: Path, referenced: set[Path], datadir: DataDir
+) -> bool:
+    if not _is_inside(path, managed_root) or not _is_in_managed_dir(path, datadir):
+        return False
+    if path in referenced:
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
+def _remove_empty_page_dir(path: Path, referenced: set[Path], datadir: DataDir) -> bool:
+    if not _is_inside(path, datadir.pages) or path == datadir.pages:
+        return False
+    if path in referenced:
+        return False
+    try:
+        path.rmdir()
+    except OSError:
+        return False
+    return True
+
+
+def _is_in_managed_dir(path: Path, datadir: DataDir) -> bool:
+    return any(
+        _is_inside(path, root)
+        for root in (datadir.process, datadir.archive, datadir.pages, datadir.exports)
+    )
+
+
+def _is_inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
