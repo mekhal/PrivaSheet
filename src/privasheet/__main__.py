@@ -16,16 +16,23 @@ def build_app(settings: Settings) -> FastAPI:
     return create_app(settings, PipelineRuntime(settings))
 
 
+def _refusal(app: FastAPI) -> Exception | None:
+    error = getattr(app.state, "startup_error", None)
+    return error if isinstance(error, REFUSALS) else None
+
+
 def main() -> int:
     settings = load_settings()
     app = build_app(settings)
     try:
         uvicorn.run(app, host=settings.host, port=settings.port)
     except BaseException:
-        error = getattr(app.state, "startup_error", None)
-        if not isinstance(error, REFUSALS):
+        # uvicorn exits (SystemExit) when the lifespan start-up fails.
+        if _refusal(app) is None:
             raise
-        print(f"privasheet: cannot start: {error}", file=sys.stderr)
+    refusal = _refusal(app)
+    if refusal is not None:
+        print(f"privasheet: cannot start: {refusal}", file=sys.stderr)
         return 1
     return 0
 

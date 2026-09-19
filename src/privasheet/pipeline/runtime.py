@@ -64,16 +64,23 @@ class PipelineRuntime:
             self._worker = worker
 
     def stop(self) -> None:
+        """Stop the worker, then free the lock.
+
+        If the worker outlives the timeout (a document is mid-processing) the lock stays held,
+        so no second instance can write to the same data directory; a later stop() retries.
+        """
         with self._state_lock:
             worker, lock = self._worker, self._lock
+            if worker is not None:
+                worker.stop(STOP_TIMEOUT_S)
+                if worker.is_running():
+                    raise RuntimeError(
+                        "pipeline worker did not stop in time; data directory lock kept"
+                    )
             self._worker = None
             self._lock = None
-            try:
-                if worker is not None:
-                    worker.stop(STOP_TIMEOUT_S)
-            finally:
-                if lock is not None:
-                    lock.release()
+            if lock is not None:
+                lock.release()
 
     def status(self) -> dict:
         worker = self._worker
