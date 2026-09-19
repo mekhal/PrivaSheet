@@ -123,7 +123,13 @@ class RapidOcrEngine:
             self.config_sha256 = _config_sha256(
                 self._models,
                 {
-                    "params": engine_params["params"],
+                    # The model files are hashed separately, so their absolute paths stay out of the
+                    # snapshot id: the same models in another install location must give the same id.
+                    "params": {
+                        key: value
+                        for key, value in engine_params["params"].items()
+                        if not key.endswith(".model_path")
+                    },
                 },
             )
         except OcrError:
@@ -218,6 +224,8 @@ def _allowed_model_roots(
 
 
 def _default_data_dir() -> Path | None:
+    # Fallback for standalone use only. web/settings.py also reads .env and defaults to <repo>/temp,
+    # so the pipeline caller (OCR-02) passes settings.data_dir explicitly rather than relying on this.
     raw = os.environ.get("PRIVASHEET_DATA_DIR")
     if not raw:
         return None
@@ -254,13 +262,23 @@ def _model_candidates_by_role(root: Path) -> dict[str, list[Path]]:
 def _rapidocr_constructor_params(
     model_paths: dict[str, Path], config: Mapping[str, Any]
 ) -> dict[str, dict[str, Any]]:
-    params: dict[str, Any] = dict(config)
+    # RapidOCR 3.x takes params keyed "<Section>.<key>" (Global, Det, Cls, Rec — see its config.yaml).
+    # ParseParams.update_batch raises ValueError for a key without a section, so reject one here with a
+    # message that names the real shape instead of letting the library fail on it.
+    params: dict[str, Any] = {}
+    for key, value in config.items():
+        if "." not in key:
+            raise OcrError(
+                "OCR_FAILED",
+                f"OCR config key {key} must be Section.key, for example Det.limit_side_len.",
+            )
+        params[key] = value
     params["Det.model_path"] = str(model_paths["det"])
     params["Rec.model_path"] = str(model_paths["rec"])
     if "cls" in model_paths:
         params["Cls.model_path"] = str(model_paths["cls"])
     else:
-        params["use_cls"] = False
+        params["Global.use_cls"] = False
     return {"params": params}
 
 

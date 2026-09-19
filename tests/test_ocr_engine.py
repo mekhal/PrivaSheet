@@ -134,10 +134,10 @@ def test_rapidocr_engine_uses_local_models_and_numpy_array(monkeypatch, tmp_path
     )
     monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
 
-    engine = RapidOcrEngine(config={"det_limit_side_len": 960})
+    engine = RapidOcrEngine(config={"Det.limit_side_len": 960})
     first_config_hash = engine.config_sha256
 
-    assert calls[0]["params"]["det_limit_side_len"] == 960
+    assert calls[0]["params"]["Det.limit_side_len"] == 960
     assert engine.recognize(Image.new("RGB", (1, 1), "white"))[0].text == "ok"
     assert calls and engine.models() == [
         {"name": "fake_cls.onnx", "sha256": _sha256(paths["cls"])},
@@ -145,7 +145,7 @@ def test_rapidocr_engine_uses_local_models_and_numpy_array(monkeypatch, tmp_path
         {"name": "fake_rec.onnx", "sha256": _sha256(paths["rec"])},
     ]
     assert (
-        RapidOcrEngine(config={"det_limit_side_len": 1280}).config_sha256
+        RapidOcrEngine(config={"Det.limit_side_len": 1280}).config_sha256
         != first_config_hash
     )
 
@@ -164,7 +164,7 @@ def test_rapidocr_engine_finds_data_dir_models_and_disables_missing_cls(
             assert params["Det.model_path"] == str(paths["det"])
             assert params["Rec.model_path"] == str(paths["rec"])
             assert "Cls.model_path" not in params
-            assert params["use_cls"] is False
+            assert params["Global.use_cls"] is False
 
     monkeypatch.setitem(
         sys.modules, "rapidocr", _rapidocr_module(package_dir, FakeRapidOCR)
@@ -236,3 +236,50 @@ def test_rapidocr_engine_recognition_exception_is_ocr_failed(monkeypatch, tmp_pa
     assert excinfo.value.code == "OCR_FAILED"
     assert "recognition failed" in excinfo.value.detail
     assert "RuntimeError" in excinfo.value.detail
+
+
+def test_rapidocr_engine_rejects_a_config_key_without_a_section(monkeypatch, tmp_path):
+    package_dir = tmp_path / "rapidocr"
+    package_dir.mkdir()
+    _write_models(package_dir)
+
+    class FakeRapidOCR:
+        def __init__(self, **kwargs):
+            raise AssertionError(
+                "the engine must not be built with an invalid config key"
+            )
+
+    monkeypatch.delenv("PRIVASHEET_DATA_DIR", raising=False)
+    monkeypatch.setitem(
+        sys.modules, "rapidocr", _rapidocr_module(package_dir, FakeRapidOCR)
+    )
+    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
+
+    with pytest.raises(OcrError) as excinfo:
+        RapidOcrEngine(config={"use_cls": False})
+
+    assert excinfo.value.code == "OCR_FAILED"
+    assert "Section.key" in excinfo.value.detail
+
+
+def test_config_sha256_does_not_depend_on_where_the_models_are_installed(
+    monkeypatch, tmp_path
+):
+    class FakeRapidOCR:
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.delenv("PRIVASHEET_DATA_DIR", raising=False)
+    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
+
+    hashes = []
+    for name in ("install_a", "install_b"):
+        package_dir = tmp_path / name / "rapidocr"
+        package_dir.mkdir(parents=True)
+        _write_models(package_dir)
+        monkeypatch.setitem(
+            sys.modules, "rapidocr", _rapidocr_module(package_dir, FakeRapidOCR)
+        )
+        hashes.append(RapidOcrEngine(config={"Det.limit_side_len": 960}).config_sha256)
+
+    assert hashes[0] == hashes[1]
