@@ -139,17 +139,93 @@ and installed, or you are guided to install it), the configured model pulled wit
 `.env` file with defaults — and finish with a self-check (OCR on a sample image, one LLM call) that reports what is
 missing. It is not built yet.
 
-**From source (today):**
+### From source (today)
 
-```bash
+**Before you start**
+
+| | |
+|---|---|
+| Python 3.12+ | `python --version`. On Windows, if that opens the Microsoft Store, install from [python.org](https://www.python.org/downloads/) and tick **Add python.exe to PATH**. |
+| Git | `git --version` |
+| A folder that is **not** synchronized | PrivaSheet keeps its database, uploads and page images next to the code. It refuses to start inside OneDrive or on a network share. Your home folder works: `C:\Users\<you>\PrivaSheet` on Windows, `~/PrivaSheet` elsewhere. Do not use OneDrive, Dropbox, Google Drive or iCloud, and note that Windows may have redirected Documents and Desktop into OneDrive. |
+
+**1. Get the code**
+
+In Command Prompt, go to the folder you chose first (`cd %USERPROFILE%` puts you in your home folder), then:
+
+```
 git clone https://github.com/mekhal/PrivaSheet.git
 cd PrivaSheet
-python -m venv .venv
-.venv/bin/pip install -e ".[dev]"          # Windows: .venv\Scripts\pip
-.venv/bin/python -m uvicorn privasheet.web.app:create_app --factory --port 8765
+git checkout develop
 ```
 
-Then open `http://127.0.0.1:8765`.
+The third line is needed today: the application lives on `develop`, and the default branch still holds the earlier
+version of the project.
+
+**2. Create the environment and install**
+
+Windows (Command Prompt):
+
+```bat
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e .
+```
+
+Windows (PowerShell) is the same, but activate with `.venv\Scripts\Activate.ps1`. If PowerShell refuses with
+"running scripts is disabled", run `Set-ExecutionPolicy -Scope Process RemoteSigned` first, then activate.
+
+Linux and macOS:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Once the environment is active the prompt starts with `(.venv)`. Every command below assumes that. A new terminal
+starts without it, so `cd` to the folder and activate again.
+
+**3. Point it at your local LLM**
+
+Create a file named `.env` in the PrivaSheet folder (`notepad .env` on Windows, `nano .env` elsewhere) with:
+
+```
+PRIVASHEET_BASE_URL=http://127.0.0.1:11434
+PRIVASHEET_MODEL=qwen2.5:7b
+```
+
+- The base URL is the **server address only, without `/v1`** — PrivaSheet appends `/v1/chat/completions` itself.
+- The host must be loopback (`127.0.0.1` or `localhost`). Any other host is refused, by design: documents never leave
+  the machine.
+- Pull the model once with `ollama pull qwen2.5:7b`, and keep Ollama running while you use PrivaSheet.
+
+**4. Start it**
+
+```
+python -m privasheet
+```
+
+Open `http://127.0.0.1:8765`. Stop it with `Ctrl+C`.
+
+`python -m privasheet` is the whole application: the web UI **and** the background worker that processes uploads.
+Starting uvicorn against `privasheet.web.app:create_app` runs the UI without that worker — every page renders, but no
+document is ever processed. Use it for UI work only.
+
+To run the tests, install the development extras as well: `pip install -e ".[dev]"`, then `pytest -q`.
+
+### If it will not start
+
+| Message | What to do |
+|---|---|
+| `cannot start: data directory must not be inside OneDrive` | The folder is synchronized. Move PrivaSheet out of OneDrive, or set `PRIVASHEET_DATA_DIR` in `.env` to a local path, written out in full: `C:\Users\<you>\PrivaSheetData`. `.env` is read literally, so `%USERPROFILE%` and `~` do not work there. |
+| `cannot start: data directory is already locked` | PrivaSheet is already running on this data directory. Close the other window, or wait a moment if you just stopped it. |
+| `cannot start: data directory must not be a network share` | Use a local disk; a mapped drive or UNC path will not do. |
+| `No module named privasheet` | You are on the default branch, which does not carry the application yet. Run `git checkout develop`, then repeat step 2. |
+| `'python' is not recognized` | Python is not on PATH. Reinstall from python.org with **Add python.exe to PATH**, then open a new terminal. |
+| `'.venv' is not recognized` or `.venv/bin/pip: No such file` | On Windows the path is `.venv\Scripts\`, not `.venv/bin/`. Activate the environment (step 2) and the paths stop mattering. |
+| The port is already in use | Something else holds 8765. Set `PRIVASHEET_PORT=8766` in `.env`. |
+| Documents stay in `needs_review` with an LLM error | Ollama is not running, or `PRIVASHEET_MODEL` names a model you have not pulled. Check with `ollama list`. |
 
 ### Configuration
 
@@ -161,9 +237,9 @@ override it.
 | `PRIVASHEET_HOST` | `127.0.0.1` | Address the web UI listens on |
 | `PRIVASHEET_PORT` | `8765` | Port |
 | `PRIVASHEET_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Host names accepted in the `Host` header |
-| `PRIVASHEET_DATA_DIR` | `temp` in the installation folder | Database, uploads, page images, exports |
-| `PRIVASHEET_BASE_URL` | — | OpenAI-compatible endpoint, e.g. `http://localhost:11434/v1` |
-| `PRIVASHEET_MODEL` | — | Model name, e.g. `qwen2.5:7b` |
+| `PRIVASHEET_DATA_DIR` | `temp` in the installation folder | Database, uploads, page images, exports. Must be local and unsynchronized |
+| `PRIVASHEET_BASE_URL` | `http://127.0.0.1:11434` | OpenAI-compatible server, address only — PrivaSheet appends `/v1/chat/completions` |
+| `PRIVASHEET_MODEL` | `local` | Model name, e.g. `qwen2.5:7b`. The default is a placeholder: set it to a model you have pulled |
 | `PRIVASHEET_DOCUMENT_TIMEOUT_S` | `600` | Time budget per document |
 
 ## Limits and conditions
