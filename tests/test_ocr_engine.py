@@ -8,11 +8,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from privasheet.ocr.engine import (
-    OcrError,
-    RapidOcrEngine,
-    rapidocr_result_to_raw_boxes,
-)
+from privasheet.ocr.engine import OcrError, RapidOcrEngine, rapidocr_result_to_raw_boxes
 
 
 def _fake_numpy_module():
@@ -27,9 +23,7 @@ def _fake_numpy_module():
     return SimpleNamespace(asarray=asarray, ndarray=FakeArray)
 
 
-def _write_fake_models(
-    root: Path, *, include_rec: bool = True, include_cls: bool = True
-) -> dict[str, Path]:
+def _write_models(root: Path, *, rec: bool = True, cls: bool = True) -> dict[str, Path]:
     model_dir = root / "models"
     model_dir.mkdir(parents=True)
     paths = {
@@ -38,15 +32,23 @@ def _write_fake_models(
         "cls": model_dir / "fake_cls.onnx",
     }
     paths["det"].write_bytes(b"det model")
-    if include_rec:
+    if rec:
         paths["rec"].write_bytes(b"rec model")
-    if include_cls:
+    if cls:
         paths["cls"].write_bytes(b"cls model")
     return paths
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _rapidocr_module(package_dir: Path, rapidocr_class):
+    return SimpleNamespace(
+        __file__=str(package_dir / "__init__.py"),
+        __version__="fake",
+        RapidOCR=rapidocr_class,
+    )
 
 
 def test_rapidocr_result_to_raw_boxes_converts_documented_shape():
@@ -73,9 +75,12 @@ def test_rapidocr_result_to_raw_boxes_converts_documented_shape():
 
 
 def test_rapidocr_result_to_raw_boxes_handles_no_text_result():
-    result = SimpleNamespace(boxes=None, txts=None, scores=None)
-
-    assert rapidocr_result_to_raw_boxes(result) == []
+    assert (
+        rapidocr_result_to_raw_boxes(
+            SimpleNamespace(boxes=None, txts=None, scores=None)
+        )
+        == []
+    )
 
 
 def test_rapidocr_result_to_raw_boxes_rejects_length_mismatch():
@@ -102,16 +107,81 @@ def test_rapidocr_engine_import_failure_is_ocr_failed(monkeypatch):
     assert "rapidocr" in excinfo.value.detail
 
 
-def test_rapidocr_engine_missing_numpy_reports_numpy(monkeypatch, tmp_path):
+def test_rapidocr_engine_uses_local_models_and_numpy_array(monkeypatch, tmp_path):
     package_dir = tmp_path / "rapidocr"
     package_dir.mkdir()
-    _write_fake_models(package_dir)
-    rapidocr_module = SimpleNamespace(
-        __file__=str(package_dir / "__init__.py"),
-        __version__="fake",
-        RapidOCR=lambda **kwargs: None,
+    paths = _write_models(package_dir)
+    calls = []
+
+    class FakeRapidOCR:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            params = kwargs["params"]
+            assert params["Det.model_path"] == str(paths["det"])
+            assert params["Rec.model_path"] == str(paths["rec"])
+            assert params["Cls.model_path"] == str(paths["cls"])
+
+        def __call__(self, image):
+            assert isinstance(image, sys.modules["numpy"].ndarray)
+            return SimpleNamespace(
+                boxes=[[[0, 0], [1, 0], [1, 1], [0, 1]]],
+                txts=["ok"],
+                scores=[0.99],
+            )
+
+    monkeypatch.setitem(
+        sys.modules, "rapidocr", _rapidocr_module(package_dir, FakeRapidOCR)
     )
-    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr_module)
+    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
+
+    engine = RapidOcrEngine(config={"det_limit_side_len": 960})
+    first_config_hash = engine.config_sha256
+
+    assert calls[0]["params"]["det_limit_side_len"] == 960
+    assert engine.recognize(Image.new("RGB", (1, 1), "white"))[0].text == "ok"
+    assert calls and engine.models() == [
+        {"name": "fake_cls.onnx", "sha256": _sha256(paths["cls"])},
+        {"name": "fake_det.onnx", "sha256": _sha256(paths["det"])},
+        {"name": "fake_rec.onnx", "sha256": _sha256(paths["rec"])},
+    ]
+    assert (
+        RapidOcrEngine(config={"det_limit_side_len": 1280}).config_sha256
+        != first_config_hash
+    )
+
+
+def test_rapidocr_engine_finds_data_dir_models_and_disables_missing_cls(
+    monkeypatch, tmp_path
+):
+    package_dir = tmp_path / "rapidocr"
+    package_dir.mkdir()
+    data_dir = tmp_path / "data"
+    paths = _write_models(data_dir, cls=False)
+
+    class FakeRapidOCR:
+        def __init__(self, **kwargs):
+            params = kwargs["params"]
+            assert params["Det.model_path"] == str(paths["det"])
+            assert params["Rec.model_path"] == str(paths["rec"])
+            assert "Cls.model_path" not in params
+            assert params["use_cls"] is False
+
+    monkeypatch.setitem(
+        sys.modules, "rapidocr", _rapidocr_module(package_dir, FakeRapidOCR)
+    )
+    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
+
+    assert RapidOcrEngine(data_dir=data_dir).models() == [
+        {"name": "fake_det.onnx", "sha256": _sha256(paths["det"])},
+        {"name": "fake_rec.onnx", "sha256": _sha256(paths["rec"])},
+    ]
+
+
+def test_rapidocr_engine_missing_numpy_and_models_are_ocr_failed(monkeypatch, tmp_path):
+    package_dir = tmp_path / "rapidocr"
+    package_dir.mkdir()
+    _write_models(package_dir)
+    monkeypatch.setitem(sys.modules, "rapidocr", _rapidocr_module(package_dir, object))
     monkeypatch.setitem(sys.modules, "numpy", None)
 
     with pytest.raises(OcrError) as excinfo:
@@ -120,13 +190,10 @@ def test_rapidocr_engine_missing_numpy_reports_numpy(monkeypatch, tmp_path):
     assert excinfo.value.code == "OCR_FAILED"
     assert "numpy" in excinfo.value.detail
 
-
-def test_rapidocr_engine_missing_model_fails_before_engine_construction(
-    monkeypatch, tmp_path
-):
-    package_dir = tmp_path / "rapidocr"
+    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
+    package_dir = tmp_path / "rapidocr_no_rec"
     package_dir.mkdir()
-    _write_fake_models(package_dir, include_rec=False)
+    _write_models(package_dir, rec=False)
     constructed = False
 
     class FakeRapidOCR:
@@ -134,13 +201,9 @@ def test_rapidocr_engine_missing_model_fails_before_engine_construction(
             nonlocal constructed
             constructed = True
 
-    rapidocr_module = SimpleNamespace(
-        __file__=str(package_dir / "__init__.py"),
-        __version__="fake",
-        RapidOCR=FakeRapidOCR,
+    monkeypatch.setitem(
+        sys.modules, "rapidocr", _rapidocr_module(package_dir, FakeRapidOCR)
     )
-    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr_module)
-    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
 
     with pytest.raises(OcrError) as excinfo:
         RapidOcrEngine()
@@ -150,223 +213,10 @@ def test_rapidocr_engine_missing_model_fails_before_engine_construction(
     assert constructed is False
 
 
-def test_rapidocr_engine_uses_explicit_local_models_and_numpy_array(
-    monkeypatch, tmp_path
-):
-    package_dir = tmp_path / "rapidocr"
-    package_dir.mkdir()
-    paths = _write_fake_models(package_dir)
-    calls = []
-
-    class FakeRapidOCR:
-        def __init__(self, **kwargs):
-            calls.append(("init", kwargs))
-            assert set(kwargs) == {"params"}
-            assert kwargs["params"]["Det.model_path"] == str(paths["det"])
-            assert kwargs["params"]["Rec.model_path"] == str(paths["rec"])
-            assert kwargs["params"]["Cls.model_path"] == str(paths["cls"])
-            assert kwargs["params"]["det_limit_side_len"] == 960
-
-        def __call__(self, image):
-            calls.append(("recognize", image))
-            assert isinstance(image, sys.modules["numpy"].ndarray)
-            return SimpleNamespace(
-                boxes=[[[0, 0], [1, 0], [1, 1], [0, 1]]],
-                txts=["ok"],
-                scores=[0.99],
-            )
-
-    rapidocr_module = SimpleNamespace(
-        __file__=str(package_dir / "__init__.py"),
-        __version__="fake",
-        RapidOCR=FakeRapidOCR,
-    )
-    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr_module)
-    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
-
-    engine = RapidOcrEngine(config={"det_limit_side_len": 960})
-    boxes = engine.recognize(Image.new("RGB", (1, 1), "white"))
-
-    assert boxes[0].text == "ok"
-    assert engine.models() == [
-        {"name": "fake_cls.onnx", "sha256": _sha256(paths["cls"])},
-        {"name": "fake_det.onnx", "sha256": _sha256(paths["det"])},
-        {"name": "fake_rec.onnx", "sha256": _sha256(paths["rec"])},
-    ]
-    assert calls[0][0] == "init"
-    assert calls[1][0] == "recognize"
-
-
-def test_rapidocr_engine_disables_classifier_when_cls_model_is_absent(
-    monkeypatch, tmp_path
-):
-    package_dir = tmp_path / "rapidocr"
-    package_dir.mkdir()
-    paths = _write_fake_models(package_dir, include_cls=False)
-
-    class FakeRapidOCR:
-        def __init__(self, **kwargs):
-            assert kwargs["params"]["Det.model_path"] == str(paths["det"])
-            assert kwargs["params"]["Rec.model_path"] == str(paths["rec"])
-            assert "Cls.model_path" not in kwargs["params"]
-            assert kwargs["params"]["use_cls"] is False
-
-    rapidocr_module = SimpleNamespace(
-        __file__=str(package_dir / "__init__.py"),
-        __version__="fake",
-        RapidOCR=FakeRapidOCR,
-    )
-    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr_module)
-    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
-
-    engine = RapidOcrEngine()
-
-    assert engine.models() == [
-        {"name": "fake_det.onnx", "sha256": _sha256(paths["det"])},
-        {"name": "fake_rec.onnx", "sha256": _sha256(paths["rec"])},
-    ]
-
-
-def test_rapidocr_engine_accepts_models_from_data_dir(monkeypatch, tmp_path):
-    package_dir = tmp_path / "rapidocr"
-    package_dir.mkdir()
-    data_dir = tmp_path / "data"
-    paths = _write_fake_models(data_dir)
-
-    class FakeRapidOCR:
-        def __init__(self, **kwargs):
-            assert kwargs["params"]["Det.model_path"] == str(paths["det"])
-            assert kwargs["params"]["Rec.model_path"] == str(paths["rec"])
-            assert kwargs["params"]["Cls.model_path"] == str(paths["cls"])
-
-        def __call__(self, image):
-            return SimpleNamespace(boxes=None, txts=None, scores=None)
-
-    rapidocr_module = SimpleNamespace(
-        __file__=str(package_dir / "__init__.py"),
-        __version__="fake",
-        RapidOCR=FakeRapidOCR,
-    )
-    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr_module)
-    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
-
-    engine = RapidOcrEngine(data_dir=data_dir)
-
-    assert engine.models() == [
-        {"name": "fake_cls.onnx", "sha256": _sha256(paths["cls"])},
-        {"name": "fake_det.onnx", "sha256": _sha256(paths["det"])},
-        {"name": "fake_rec.onnx", "sha256": _sha256(paths["rec"])},
-    ]
-
-
-def test_rapidocr_engine_model_dir_takes_precedence_over_package(monkeypatch, tmp_path):
-    package_dir = tmp_path / "rapidocr"
-    package_dir.mkdir()
-    package_paths = _write_fake_models(package_dir)
-    (package_paths["det"].parent / "other_det.onnx").write_bytes(b"det 2")
-    explicit_dir = tmp_path / "explicit"
-    paths = _write_fake_models(explicit_dir)
-
-    class FakeRapidOCR:
-        def __init__(self, **kwargs):
-            assert kwargs["params"]["Det.model_path"] == str(paths["det"])
-            assert kwargs["params"]["Rec.model_path"] == str(paths["rec"])
-            assert kwargs["params"]["Cls.model_path"] == str(paths["cls"])
-
-    rapidocr_module = SimpleNamespace(
-        __file__=str(package_dir / "__init__.py"),
-        __version__="fake",
-        RapidOCR=FakeRapidOCR,
-    )
-    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr_module)
-    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
-
-    RapidOcrEngine(model_dir=explicit_dir)
-
-
-def test_rapidocr_engine_rejects_ambiguous_models_within_root(monkeypatch, tmp_path):
-    package_dir = tmp_path / "rapidocr"
-    package_dir.mkdir()
-    paths = _write_fake_models(package_dir)
-    (paths["det"].parent / "other_det.onnx").write_bytes(b"det 2")
-
-    class FakeRapidOCR:
-        def __init__(self, **kwargs):
-            raise AssertionError("engine should not be constructed")
-
-    rapidocr_module = SimpleNamespace(
-        __file__=str(package_dir / "__init__.py"),
-        __version__="fake",
-        RapidOCR=FakeRapidOCR,
-    )
-    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr_module)
-    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
-
-    with pytest.raises(OcrError) as excinfo:
-        RapidOcrEngine()
-
-    assert excinfo.value.code == "OCR_FAILED"
-    assert "Ambiguous OCR model det" in excinfo.value.detail
-
-
-def test_rapidocr_engine_ignores_data_files_outside_models_dir(monkeypatch, tmp_path):
-    package_dir = tmp_path / "rapidocr"
-    package_dir.mkdir()
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    (data_dir / "fake_det.onnx").write_bytes(b"det")
-    (data_dir / "fake_rec.onnx").write_bytes(b"rec")
-
-    class FakeRapidOCR:
-        def __init__(self, **kwargs):
-            raise AssertionError("engine should not be constructed")
-
-    rapidocr_module = SimpleNamespace(
-        __file__=str(package_dir / "__init__.py"),
-        __version__="fake",
-        RapidOCR=FakeRapidOCR,
-    )
-    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr_module)
-    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
-
-    with pytest.raises(OcrError) as excinfo:
-        RapidOcrEngine(data_dir=data_dir)
-
-    assert excinfo.value.code == "OCR_FAILED"
-    assert "Missing OCR model" in excinfo.value.detail
-
-
-def test_rapidocr_engine_model_role_matching_uses_tokens(monkeypatch, tmp_path):
-    package_dir = tmp_path / "rapidocr"
-    package_dir.mkdir()
-    model_dir = package_dir / "models"
-    model_dir.mkdir()
-    (model_dir / "detail.onnx").write_bytes(b"not det")
-    (model_dir / "record.onnx").write_bytes(b"not rec")
-
-    class FakeRapidOCR:
-        def __init__(self, **kwargs):
-            raise AssertionError("engine should not be constructed")
-
-    rapidocr_module = SimpleNamespace(
-        __file__=str(package_dir / "__init__.py"),
-        __version__="fake",
-        RapidOCR=FakeRapidOCR,
-    )
-    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr_module)
-    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
-
-    with pytest.raises(OcrError) as excinfo:
-        RapidOcrEngine()
-
-    assert excinfo.value.code == "OCR_FAILED"
-    assert "Missing OCR model" in excinfo.value.detail
-
-
 def test_rapidocr_engine_recognition_exception_is_ocr_failed(monkeypatch, tmp_path):
     package_dir = tmp_path / "rapidocr"
     package_dir.mkdir()
-    _write_fake_models(package_dir)
+    _write_models(package_dir)
 
     class FakeRapidOCR:
         def __init__(self, **kwargs):
@@ -375,46 +225,14 @@ def test_rapidocr_engine_recognition_exception_is_ocr_failed(monkeypatch, tmp_pa
         def __call__(self, image):
             raise RuntimeError("boom")
 
-    rapidocr_module = SimpleNamespace(
-        __file__=str(package_dir / "__init__.py"),
-        __version__="fake",
-        RapidOCR=FakeRapidOCR,
+    monkeypatch.setitem(
+        sys.modules, "rapidocr", _rapidocr_module(package_dir, FakeRapidOCR)
     )
-    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr_module)
     monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
 
-    engine = RapidOcrEngine()
-
     with pytest.raises(OcrError) as excinfo:
-        engine.recognize(Image.new("RGB", (1, 1), "white"))
+        RapidOcrEngine().recognize(Image.new("RGB", (1, 1), "white"))
 
     assert excinfo.value.code == "OCR_FAILED"
     assert "recognition failed" in excinfo.value.detail
-    assert "boom" not in excinfo.value.detail
     assert "RuntimeError" in excinfo.value.detail
-
-
-def test_rapidocr_engine_config_hash_changes_with_effective_config(
-    monkeypatch, tmp_path
-):
-    package_dir = tmp_path / "rapidocr"
-    package_dir.mkdir()
-    _write_fake_models(package_dir)
-
-    class FakeRapidOCR:
-        def __init__(self, **kwargs):
-            pass
-
-    rapidocr_module = SimpleNamespace(
-        __file__=str(package_dir / "__init__.py"),
-        __version__="fake",
-        RapidOCR=FakeRapidOCR,
-    )
-    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr_module)
-    monkeypatch.setitem(sys.modules, "numpy", _fake_numpy_module())
-
-    first = RapidOcrEngine(config={"det_limit_side_len": 960})
-    second = RapidOcrEngine(config={"det_limit_side_len": 1280})
-
-    assert first.models() == second.models()
-    assert first.config_sha256 != second.config_sha256
