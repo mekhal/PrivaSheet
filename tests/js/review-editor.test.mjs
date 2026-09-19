@@ -4,11 +4,14 @@ import assert from "node:assert/strict";
 import {
   actionState,
   acknowledgementKey,
+  addTableRow,
   buildDuplicateHref,
   buildReviewPayload,
   cancelDraft,
   createDraft,
   draftIssues,
+  isDirty,
+  removeTableRow,
   markRejected,
   markReviewed,
   saveDraft,
@@ -157,23 +160,50 @@ test("save from every editable status moves to needs_review and enables mark rev
   }
 });
 
-test("cancel drops draft without changing status, stored values, or review", () => {
+test("isDirty sees edited values, added and removed rows, and a reverted edit", () => {
+  const result = fixture();
+  const stored = createDraft(result);
+
+  assert.equal(isDirty(createDraft(result), stored), false);
+
+  const edited = createDraft(result);
+  edited.fields.total = "1300.00";
+  assert.equal(isDirty(edited, stored), true);
+
+  edited.fields.total = stored.fields.total;
+  assert.equal(isDirty(edited, stored), false);
+
+  assert.equal(isDirty(addTableRow(result, stored, "line_items"), stored), true);
+  assert.equal(isDirty(removeTableRow(stored, "line_items", 0), stored), true);
+
+  const editedCell = createDraft(result);
+  editedCell.tables.line_items[0].amount = "1300.00";
+  assert.equal(isDirty(editedCell, stored), true);
+});
+
+test("cancel drops the edited draft and unsaved acknowledgements, and leaves the result untouched", () => {
+  const stored = { invoice_no: "INV-0042", date: "2026-09-18", total: "1284.00" };
   const result = fixture({
     status: "reviewed",
     review: {
-      fields: { invoice_no: "INV-0042", date: "2026-09-18", total: "1284.00" },
+      fields: { ...stored },
       tables: { line_items: [{ description: "Stored", amount: "1284.00" }] },
       acknowledged: { revision: 1, issues: ["0:AI_UNCERTAIN:fields.total"] },
     },
   });
-  const draft = createDraft(result);
-  draft.fields.total = "1300.00";
+  const edited = createDraft(result);
+  edited.fields.total = "1300.00";
+  const tickedDuringEdit = ["0:AI_UNCERTAIN:fields.total", "1:DUPLICATE_DOCUMENT:document"];
 
-  const next = cancelDraft(result);
+  const cancelled = cancelDraft(result);
 
-  assert.equal(next.status, "reviewed");
-  assert.deepEqual(next.review, result.review);
-  assert.equal(next.draft.fields.total, "1284.00");
+  assert.equal(isDirty(edited, cancelled.draft), true);
+  assert.equal(cancelled.draft.fields.total, "1284.00");
+  assert.deepEqual(cancelled.acknowledgedIssues, ["0:AI_UNCERTAIN:fields.total"]);
+  assert.notDeepEqual(cancelled.acknowledgedIssues, tickedDuringEdit);
+  assert.equal(cancelled.editing, false);
+  assert.equal(result.status, "reviewed");
+  assert.deepEqual(result.review.fields, stored);
 });
 
 test("mark reviewed and rejected require valid canonical draft and acknowledgements", () => {

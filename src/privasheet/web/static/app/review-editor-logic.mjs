@@ -45,7 +45,7 @@ function isValidDate(value) {
   return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
 }
 
-function validateValue(item, value, path) {
+function validateValue(item, value) {
   if (value === "") {
     if (item.required) {
       return `${labelFor(item)} is required.`;
@@ -117,7 +117,7 @@ export function removeTableRow(draft, tableKey, rowIndex) {
 export function draftIssues(result, draft) {
   const issues = [];
   for (const field of result.schema.fields || []) {
-    const message = validateValue(field, draft.fields[field.key] ?? "", `fields.${field.key}`);
+    const message = validateValue(field, draft.fields[field.key] ?? "");
     if (message) {
       issues.push({ path: `fields.${field.key}`, message });
     }
@@ -125,11 +125,7 @@ export function draftIssues(result, draft) {
   for (const table of result.schema.tables || []) {
     for (const [rowIndex, row] of (draft.tables[table.key] || []).entries()) {
       for (const column of table.columns || []) {
-        const message = validateValue(
-          column,
-          row[column.key] ?? "",
-          `tables.${table.key}.${rowIndex}.${column.key}`,
-        );
+        const message = validateValue(column, row[column.key] ?? "");
         if (message) {
           issues.push({
             path: `tables.${table.key}.${rowIndex}.${column.key}`,
@@ -187,6 +183,39 @@ export function buildReviewPayload(result, draft, acknowledgedIssues) {
   };
 }
 
+function sameValues(row, storedRow) {
+  const keys = new Set([...Object.keys(row || {}), ...Object.keys(storedRow || {})]);
+  for (const key of keys) {
+    if ((row?.[key] ?? "") !== (storedRow?.[key] ?? "")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function isDirty(draft, storedDraft) {
+  if (!sameValues(draft?.fields, storedDraft?.fields)) {
+    return true;
+  }
+  const tableKeys = new Set([
+    ...Object.keys(draft?.tables || {}),
+    ...Object.keys(storedDraft?.tables || {}),
+  ]);
+  for (const key of tableKeys) {
+    const rows = draft?.tables?.[key] || [];
+    const storedRows = storedDraft?.tables?.[key] || [];
+    if (rows.length !== storedRows.length) {
+      return true;
+    }
+    for (const [index, row] of rows.entries()) {
+      if (!sameValues(row, storedRows[index])) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function actionState(status, dirty, validationIssues, acknowledged) {
   const editable = REVIEWABLE_STATUSES.has(status);
   const valid = validationIssues.length === 0;
@@ -226,8 +255,9 @@ export function saveDraft(result, draft, acknowledgedIssues) {
 
 export function cancelDraft(result) {
   return {
-    ...result,
     draft: createDraft(result),
+    acknowledgedIssues: result.review?.acknowledged?.issues || [],
+    editing: false,
   };
 }
 

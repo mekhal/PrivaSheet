@@ -430,7 +430,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return render(request, "scan.html", "Scan batch")
 
     @app.get("/review", response_class=HTMLResponse)
-    async def review_page(request: Request) -> HTMLResponse:
+    async def review_page(
+        request: Request, document_id: str | None = None
+    ) -> HTMLResponse:
+        # document_id is the duplicate link target (task WEB-04). The screen still renders the
+        # synthetic fixture; only the URL contract is fixed at this stage.
         return templates.TemplateResponse(
             request,
             "review.html",
@@ -440,6 +444,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "settings": settings,
                 "overlay_data": DEMO_OVERLAY_DATA,
                 "review_data": DEMO_REVIEW_DATA,
+                "document_id": document_id,
             },
         )
 

@@ -5,8 +5,10 @@ import {
   allIssuesAcknowledged,
   buildDuplicateHref,
   buildReviewPayload,
+  cancelDraft,
   createDraft,
   draftIssues,
+  isDirty,
   markRejected,
   markReviewed,
   removeTableRow,
@@ -61,7 +63,7 @@ import {
     );
     const [message, setMessage] = useState("");
     const validationIssues = useMemo(() => draftIssues(result, draft), [result, draft]);
-    const dirty = JSON.stringify(draft) !== JSON.stringify(storedDraft);
+    const dirty = isDirty(draft, storedDraft);
     const acknowledged = allIssuesAcknowledged(result, acknowledgedIssues);
     const actions = actionState(result.status, dirty, validationIssues, acknowledged);
 
@@ -112,8 +114,10 @@ import {
     }
 
     function onCancel() {
-      setDraft(storedDraft);
-      setEditing(false);
+      const cancelled = cancelDraft(result);
+      setDraft(cancelled.draft);
+      setAcknowledgedIssues(cancelled.acknowledgedIssues);
+      setEditing(cancelled.editing);
       setMessage("Edits cancelled.");
     }
 
