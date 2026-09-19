@@ -43,49 +43,75 @@ def _correct_archived_document_paths(conn: sqlite3.Connection, datadir: DataDir)
 
 
 def _remove_orphans(conn: sqlite3.Connection, datadir: DataDir) -> tuple[int, int]:
-    referenced = _referenced_paths(conn, datadir)
-    managed_roots = (datadir.process, datadir.archive, datadir.pages)
+    root = datadir.root.resolve()
+    process = root / "process"
+    archive = root / "archive"
+    pages = root / "pages"
+    exports = root / "exports"
+    managed_roots = (process, archive, pages)
+    referenced = _referenced_paths(
+        conn, datadir, managed_roots=(process, archive, pages, exports)
+    )
     removed_files = 0
     removed_dirs = 0
 
-    for root in managed_roots:
-        if not root.exists():
+    for managed_root in managed_roots:
+        if not managed_root.exists():
             continue
-        for current, dirs, files in os.walk(root, topdown=False, followlinks=False):
+        for current, dirs, files in os.walk(
+            managed_root, topdown=False, followlinks=False
+        ):
             current_path = Path(current)
             for name in files:
                 path = current_path / name
-                if _remove_file_if_orphan(path, root, referenced, datadir):
+                if _remove_file_if_orphan(
+                    path,
+                    managed_root,
+                    referenced,
+                    managed_roots=(process, archive, pages, exports),
+                ):
                     removed_files += 1
             for name in dirs:
                 path = current_path / name
                 if path.is_symlink():
-                    if _remove_file_if_orphan(path, root, referenced, datadir):
+                    if _remove_file_if_orphan(
+                        path,
+                        managed_root,
+                        referenced,
+                        managed_roots=(process, archive, pages, exports),
+                    ):
                         removed_files += 1
                     continue
                 if (
-                    root == datadir.pages or datadir.pages in path.parents
-                ) and _remove_empty_page_dir(path, referenced, datadir):
+                    managed_root == pages or pages in path.parents
+                ) and _remove_empty_page_dir(path, pages, referenced):
                     removed_dirs += 1
     return removed_files, removed_dirs
 
 
-def _referenced_paths(conn: sqlite3.Connection, datadir: DataDir) -> set[Path]:
+def _referenced_paths(
+    conn: sqlite3.Connection, datadir: DataDir, managed_roots: tuple[Path, ...]
+) -> set[Path]:
     referenced: set[Path] = set()
     for stored in store_repo.referenced_file_paths(conn):
         try:
             path = datadir.resolve(stored)
         except DataDirError:
             continue
-        if _is_in_managed_dir(path, datadir):
+        if _is_in_managed_dir(path, managed_roots):
             referenced.add(path)
     return referenced
 
 
 def _remove_file_if_orphan(
-    path: Path, managed_root: Path, referenced: set[Path], datadir: DataDir
+    path: Path,
+    managed_root: Path,
+    referenced: set[Path],
+    managed_roots: tuple[Path, ...],
 ) -> bool:
-    if not _is_inside(path, managed_root) or not _is_in_managed_dir(path, datadir):
+    if not _is_inside(path, managed_root) or not _is_in_managed_dir(
+        path, managed_roots
+    ):
         return False
     if path in referenced:
         return False
@@ -93,8 +119,8 @@ def _remove_file_if_orphan(
     return True
 
 
-def _remove_empty_page_dir(path: Path, referenced: set[Path], datadir: DataDir) -> bool:
-    if not _is_inside(path, datadir.pages) or path == datadir.pages:
+def _remove_empty_page_dir(path: Path, pages: Path, referenced: set[Path]) -> bool:
+    if not _is_inside(path, pages) or path == pages:
         return False
     if path in referenced:
         return False
@@ -105,16 +131,13 @@ def _remove_empty_page_dir(path: Path, referenced: set[Path], datadir: DataDir) 
     return True
 
 
-def _is_in_managed_dir(path: Path, datadir: DataDir) -> bool:
-    return any(
-        _is_inside(path, root)
-        for root in (datadir.process, datadir.archive, datadir.pages, datadir.exports)
-    )
+def _is_in_managed_dir(path: Path, managed_roots: tuple[Path, ...]) -> bool:
+    return any(_is_inside(path, root) for root in managed_roots)
 
 
 def _is_inside(path: Path, root: Path) -> bool:
     try:
-        path.relative_to(root.resolve())
+        path.relative_to(root)
     except ValueError:
         return False
     return True

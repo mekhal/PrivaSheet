@@ -169,8 +169,9 @@ class _WindowsLock(_BaseLock):
         fileobj = path.open("a+b")
         try:
             fileobj.seek(0)
-            fileobj.write(b"\0")
-            fileobj.flush()
+            if os.fstat(fileobj.fileno()).st_size == 0:
+                fileobj.write(b"\0")
+                fileobj.flush()
             fileobj.seek(0)
             msvcrt.locking(fileobj.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError as exc:

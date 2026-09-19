@@ -79,6 +79,14 @@ def test_recover_resets_corrects_removes_orphans_and_is_idempotent(tmp_path):
                 "path": "archive/kept.pdf",
                 "snapshot_id": "sha256:s1",
             },
+            {
+                "document_id": "doc_process",
+                "result_id": "res_process",
+                "sha256": "hash-process",
+                "source_file": "process-kept.pdf",
+                "path": "process/process-kept.pdf",
+                "snapshot_id": "sha256:s1",
+            },
         ]
         manifest = {
             "batch_id": "bat_1",
@@ -100,10 +108,14 @@ def test_recover_resets_corrects_removes_orphans_and_is_idempotent(tmp_path):
             [
                 result_doc("res_moved", "doc_moved", "processing"),
                 result_doc("res_kept", "doc_kept", "queued"),
+                result_doc("res_process", "doc_process", "queued"),
             ],
         )
         (datadir.archive / "moved.pdf").write_text("moved", encoding="utf-8")
         (datadir.archive / "kept.pdf").write_text("kept", encoding="utf-8")
+        (datadir.process / "process-kept.pdf").write_text(
+            "process kept", encoding="utf-8"
+        )
         (datadir.archive / "orphan-upload.pdf").write_text("orphan", encoding="utf-8")
         (datadir.process / "leftover.tmp").write_text("tmp", encoding="utf-8")
         (datadir.pages / "s1").mkdir()
@@ -132,8 +144,12 @@ def test_recover_resets_corrects_removes_orphans_and_is_idempotent(tmp_path):
             updated_at="2026-09-17T00:20:00Z",
         )
         assert get_document(conn, "doc_moved")["path"] == "archive/moved.pdf"
+        assert get_document(conn, "doc_process")["path"] == "process/process-kept.pdf"
         assert (datadir.archive / "moved.pdf").read_text(encoding="utf-8") == "moved"
         assert (datadir.archive / "kept.pdf").read_text(encoding="utf-8") == "kept"
+        assert (datadir.process / "process-kept.pdf").read_text(
+            encoding="utf-8"
+        ) == "process kept"
         assert (datadir.pages / "s1" / "page-1.png").exists()
         assert not (datadir.archive / "orphan-upload.pdf").exists()
         assert not (datadir.process / "leftover.tmp").exists()
@@ -147,5 +163,76 @@ def test_recover_resets_corrects_removes_orphans_and_is_idempotent(tmp_path):
             "removed_files": 0,
             "removed_dirs": 0,
         }
+    finally:
+        conn.close()
+
+
+def test_recover_removes_orphans_with_symlinked_datadir_root(tmp_path):
+    real_root = tmp_path / "real-data"
+    linked_root = tmp_path / "linked-data"
+    real_root.mkdir()
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    datadir = DataDir(linked_root)
+    datadir.prepare()
+    conn = open_db(datadir.db_path)
+    migrate(conn)
+
+    try:
+        insert_template(conn, template_doc())
+        insert_snapshot(conn, snapshot_doc())
+        documents = [
+            {
+                "document_id": "doc_process",
+                "result_id": "res_process",
+                "sha256": "hash-process",
+                "source_file": "process-kept.pdf",
+                "path": "process/process-kept.pdf",
+                "snapshot_id": "sha256:s1",
+            },
+            {
+                "document_id": "doc_bad_path",
+                "result_id": "res_bad_path",
+                "sha256": "hash-bad-path",
+                "source_file": "bad-path.pdf",
+                "path": "../outside.pdf",
+                "snapshot_id": "sha256:s1",
+            },
+        ]
+        create_batch(
+            conn,
+            {
+                "batch_id": "bat_1",
+                "created_at": "2026-09-17T00:02:00Z",
+                "template": {"id": "invoice-a", "version": 1},
+                "documents": [
+                    {
+                        "document_id": "doc_process",
+                        "result_id": "res_process",
+                        "source_file": "process-kept.pdf",
+                    },
+                    {
+                        "document_id": "doc_bad_path",
+                        "result_id": "res_bad_path",
+                        "source_file": "bad-path.pdf",
+                    },
+                ],
+            },
+            documents,
+            [
+                result_doc("res_process", "doc_process", "queued"),
+                result_doc("res_bad_path", "doc_bad_path", "queued"),
+            ],
+        )
+        kept = real_root / "process" / "process-kept.pdf"
+        orphan = real_root / "process" / "orphan.tmp"
+        kept.write_text("process kept", encoding="utf-8")
+        orphan.write_text("orphan", encoding="utf-8")
+
+        counts = recover(conn, datadir, "2026-09-17T00:20:00Z")
+
+        assert counts["removed_files"] == 1
+        assert get_document(conn, "doc_bad_path")["path"] == "../outside.pdf"
+        assert kept.read_text(encoding="utf-8") == "process kept"
+        assert not orphan.exists()
     finally:
         conn.close()
