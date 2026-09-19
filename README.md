@@ -186,19 +186,36 @@ pip install -e .
 Once the environment is active the prompt starts with `(.venv)`. Every command below assumes that. A new terminal
 starts without it, so `cd` to the folder and activate again.
 
+Then add the OCR engine, in the same terminal:
+
+```
+pip install rapidocr onnxruntime
+```
+
+It is a separate line because it is not in the project dependencies yet. The OCR models ship inside the `rapidocr`
+package, so this is the only download: PrivaSheet never fetches a model while it runs. Without it, every document
+fails with `Missing OCR package rapidocr`.
+
 **3. Point it at your local LLM**
 
-Create a file named `.env` in the PrivaSheet folder (`notepad .env` on Windows, `nano .env` elsewhere) with:
+Install [Ollama](https://ollama.com/) if you do not have it, start it, and pull a model once:
+
+```
+ollama pull qwen2.5:7b
+```
+
+Then create a file named `.env` in the PrivaSheet folder (`notepad .env` on Windows, `nano .env` elsewhere) with:
 
 ```
 PRIVASHEET_BASE_URL=http://127.0.0.1:11434
 PRIVASHEET_MODEL=qwen2.5:7b
 ```
 
-- The base URL is the **server address only, without `/v1`** — PrivaSheet appends `/v1/chat/completions` itself.
+- Only the scheme, host and port of the base URL are used. Requests always go to `/v1/chat/completions` on that
+  address, so a trailing `/v1` changes nothing either way.
 - The host must be loopback (`127.0.0.1` or `localhost`). Any other host is refused, by design: documents never leave
   the machine.
-- Pull the model once with `ollama pull qwen2.5:7b`, and keep Ollama running while you use PrivaSheet.
+- `PRIVASHEET_MODEL` must name a model you have pulled. Keep Ollama running while you use PrivaSheet.
 
 **4. Start it**
 
@@ -218,19 +235,21 @@ To run the tests, install the development extras as well: `pip install -e ".[dev
 
 | Message | What to do |
 |---|---|
-| `cannot start: data directory must not be inside OneDrive` | The folder is synchronized. Move PrivaSheet out of OneDrive, or set `PRIVASHEET_DATA_DIR` in `.env` to a local path, written out in full: `C:\Users\<you>\PrivaSheetData`. `.env` is read literally, so `%USERPROFILE%` and `~` do not work there. |
-| `cannot start: data directory is already locked` | PrivaSheet is already running on this data directory. Close the other window, or wait a moment if you just stopped it. |
-| `cannot start: data directory must not be a network share` | Use a local disk; a mapped drive or UNC path will not do. |
+| `privasheet: cannot start: data directory must not be inside OneDrive` | The folder is synchronized. Move PrivaSheet out of OneDrive, or set `PRIVASHEET_DATA_DIR` in `.env` to a local path, written out in full: `C:\Users\<you>\PrivaSheetData`. `.env` is read literally, so `%USERPROFILE%` and `~` do not work there. |
+| `privasheet: cannot start: data directory is already locked` | PrivaSheet is already running on this data directory. Close the other window, or wait a moment if you just stopped it. |
+| `privasheet: cannot start: data directory must not be a network share` | Use a local disk; a mapped drive or UNC path will not do. |
 | `No module named privasheet` | You are on the default branch, which does not carry the application yet. Run `git checkout develop`, then repeat step 2. |
 | `'python' is not recognized` | Python is not on PATH. Reinstall from python.org with **Add python.exe to PATH**, then open a new terminal. |
 | `'.venv' is not recognized` or `.venv/bin/pip: No such file` | On Windows the path is `.venv\Scripts\`, not `.venv/bin/`. Activate the environment (step 2) and the paths stop mattering. |
 | The port is already in use | Something else holds 8765. Set `PRIVASHEET_PORT=8766` in `.env`. |
-| Documents stay in `needs_review` with an LLM error | Ollama is not running, or `PRIVASHEET_MODEL` names a model you have not pulled. Check with `ollama list`. |
+| A document ends as `failed` with `LLM_UNAVAILABLE` | Ollama is not running, or `PRIVASHEET_MODEL` names a model you have not pulled. Check with `ollama list`, then upload again. |
+| A document ends as `failed` with an OCR error | The OCR engine is missing. Activate the environment and run `pip install rapidocr onnxruntime`. |
+| `'ollama' is not recognized` | Ollama is not installed. Get it from [ollama.com](https://ollama.com/), then open a new terminal. |
 
 ### Configuration
 
-A `.env` file in the installation folder, created by the installer and editable by hand. Environment variables
-override it.
+A `.env` file in the installation folder. You write it by hand today (step 3 above); the planned installer will
+create it for you. Environment variables override it.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -238,7 +257,7 @@ override it.
 | `PRIVASHEET_PORT` | `8765` | Port |
 | `PRIVASHEET_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Host names accepted in the `Host` header |
 | `PRIVASHEET_DATA_DIR` | `temp` in the installation folder | Database, uploads, page images, exports. Must be local and unsynchronized |
-| `PRIVASHEET_BASE_URL` | `http://127.0.0.1:11434` | OpenAI-compatible server, address only — PrivaSheet appends `/v1/chat/completions` |
+| `PRIVASHEET_BASE_URL` | `http://127.0.0.1:11434` | OpenAI-compatible server. Only scheme, host and port are used; requests go to `/v1/chat/completions` |
 | `PRIVASHEET_MODEL` | `local` | Model name, e.g. `qwen2.5:7b`. The default is a placeholder: set it to a model you have pulled |
 | `PRIVASHEET_DOCUMENT_TIMEOUT_S` | `600` | Time budget per document |
 
