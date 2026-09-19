@@ -65,6 +65,11 @@ def upload(name: str, data: bytes) -> Upload:
     return Upload(source_name=name, stream=BytesIO(data))
 
 
+class FailingStream(BytesIO):
+    def read(self, size=-1):
+        raise OSError("synthetic read failure")
+
+
 def read_process_file(datadir: Path, document_id: str) -> Path:
     matches = list((datadir / "process").glob(f"{document_id}.*"))
     assert len(matches) == 1
@@ -190,6 +195,12 @@ def test_missing_template_is_caller_error(conn, tmp_path):
 
 
 def test_database_failure_removes_saved_files(conn, tmp_path):
+    conn.execute(
+        "INSERT INTO documents(document_id, sha256, source_file, path, snapshot_id) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("doc_existing", "old", "old.png", None, None),
+    )
+
     with pytest.raises(sqlite3.IntegrityError):
         create_batch(
             conn,
@@ -197,7 +208,26 @@ def test_database_failure_removes_saved_files(conn, tmp_path):
             "invoice-a",
             1,
             [upload("a.png", image_bytes("PNG")), upload("b.png", image_bytes("PNG"))],
-            new_id=ids("same", "same", "same", "same", "same"),
+            new_id=ids("b1", "d1", "r1", "existing", "r2"),
+        )
+
+    assert list((tmp_path / "process").glob("*")) == []
+    assert conn.execute("SELECT count(*) FROM documents").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM results").fetchone()[0] == 0
+
+
+def test_prepare_failure_removes_current_and_previous_saved_files(conn, tmp_path):
+    with pytest.raises(OSError, match="synthetic read failure"):
+        create_batch(
+            conn,
+            tmp_path,
+            "invoice-a",
+            1,
+            [
+                upload("a.png", image_bytes("PNG")),
+                Upload(source_name="broken.png", stream=FailingStream()),
+            ],
+            new_id=ids("b1", "d1", "r1", "d2", "r2"),
         )
 
     assert list((tmp_path / "process").glob("*")) == []
@@ -240,6 +270,43 @@ def test_add_files_appends_to_manifest_order(conn, tmp_path):
         "first.png",
         "second.png",
         "third.jpg",
+    ]
+
+
+def test_add_files_database_failure_removes_saved_files(conn, tmp_path):
+    create_batch(
+        conn,
+        tmp_path,
+        "invoice-a",
+        1,
+        [upload("first.png", image_bytes("PNG"))],
+        new_id=ids("b1", "d1", "r1"),
+    )
+    conn.execute(
+        "INSERT INTO documents(document_id, sha256, source_file, path, snapshot_id) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("doc_existing", "old", "old.png", None, None),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        add_files(
+            conn,
+            tmp_path,
+            "bat_b1",
+            [
+                upload("second.png", image_bytes("PNG")),
+                upload("third.png", image_bytes("PNG")),
+            ],
+            new_id=ids("d2", "r2", "existing", "r3"),
+        )
+
+    assert sorted(path.name for path in (tmp_path / "process").glob("*")) == [
+        "doc_d1.png"
+    ]
+    assert get_document(conn, "doc_d2") is None
+    assert get_result(conn, "res_r2") is None
+    assert [doc["source_file"] for doc in get_batch(conn, "bat_b1")["documents"]] == [
+        "first.png"
     ]
 
 

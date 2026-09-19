@@ -37,6 +37,16 @@ class IntakeResult:
     rejected: list[RejectedUpload] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class PreparedIntake:
+    accepted: list[tuple[str, str, str]]
+    rejected: list[RejectedUpload]
+    documents: list[dict]
+    results: list[dict]
+    manifest_entries: list[dict]
+    paths: list[str]
+
+
 Now = Callable[[], str]
 NewId = Callable[[str], str]
 DEFAULT_LIMITS = Limits()
@@ -73,25 +83,25 @@ def create_batch(
     intake = _prepare_uploads(
         datadir, batch_id, template_id, version, uploads, limits, created_at, new_id
     )
-    if not intake["documents"]:
-        return IntakeResult(batch_id=None, rejected=intake["rejected"])
+    if not intake.documents:
+        return IntakeResult(batch_id=None, rejected=intake.rejected)
 
     try:
         manifest = {
             "batch_id": batch_id,
             "created_at": created_at,
             "template": {"id": template_id, "version": version},
-            "documents": _manifest_entries(intake["documents"], intake["results"]),
+            "documents": intake.manifest_entries,
         }
-        repo.create_batch(conn, manifest, intake["documents"], intake["results"])
+        repo.create_batch(conn, manifest, intake.documents, intake.results)
     except BaseException:
-        _remove_paths(datadir, intake["paths"])
+        _remove_paths(datadir, intake.paths)
         raise
 
     return IntakeResult(
         batch_id=batch_id,
-        accepted=intake["accepted"],
-        rejected=intake["rejected"],
+        accepted=intake.accepted,
+        rejected=intake.rejected,
     )
 
 
@@ -126,21 +136,19 @@ def add_files(
         created_at,
         new_id,
     )
-    if not intake["documents"]:
-        return IntakeResult(batch_id=batch_id, rejected=intake["rejected"])
+    if not intake.documents:
+        return IntakeResult(batch_id=batch_id, rejected=intake.rejected)
 
     try:
-        repo.add_documents_to_batch(
-            conn, batch_id, intake["documents"], intake["results"]
-        )
+        repo.add_documents_to_batch(conn, batch_id, intake.documents, intake.results)
     except BaseException:
-        _remove_paths(datadir, intake["paths"])
+        _remove_paths(datadir, intake.paths)
         raise
 
     return IntakeResult(
         batch_id=batch_id,
-        accepted=intake["accepted"],
-        rejected=intake["rejected"],
+        accepted=intake.accepted,
+        rejected=intake.rejected,
     )
 
 
@@ -166,11 +174,12 @@ def _prepare_uploads(
     limits: Limits,
     updated_at: str,
     new_id: NewId,
-) -> dict:
+) -> PreparedIntake:
     accepted: list[tuple[str, str, str]] = []
     rejected: list[RejectedUpload] = []
     documents: list[dict] = []
     results: list[dict] = []
+    manifest_entries: list[dict] = []
     saved_paths: list[str] = []
 
     process_dir = Path(datadir) / "process"
@@ -195,6 +204,7 @@ def _prepare_uploads(
             inspect_upload(final_path, kind, limits)
             sha256 = _sha256_file(final_path)
             _fsync_file(final_path)
+            _fsync_dir(process_dir)
 
             relative_path = f"process/{final_path.name}"
             documents.append(
@@ -225,6 +235,13 @@ def _prepare_uploads(
                     "updated_at": updated_at,
                 }
             )
+            manifest_entries.append(
+                {
+                    "document_id": document_id,
+                    "result_id": result_id,
+                    "source_file": upload.source_name,
+                }
+            )
             accepted.append((document_id, result_id, upload.source_name))
             saved_paths.append(relative_path)
         except IngestError as exc:
@@ -232,26 +249,21 @@ def _prepare_uploads(
             if final_path is not None:
                 final_path.unlink(missing_ok=True)
             rejected.append(RejectedUpload(upload.source_name, exc.code, exc.detail))
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            if final_path is not None:
+                final_path.unlink(missing_ok=True)
+            _remove_paths(datadir, saved_paths)
+            raise
 
-    return {
-        "accepted": accepted,
-        "rejected": rejected,
-        "documents": documents,
-        "results": results,
-        "paths": saved_paths,
-    }
-
-
-def _manifest_entries(documents: list[dict], results: list[dict]) -> list[dict]:
-    by_document_id = {result["document_id"]: result for result in results}
-    return [
-        {
-            "document_id": document["document_id"],
-            "result_id": by_document_id[document["document_id"]]["result_id"],
-            "source_file": document["source_file"],
-        }
-        for document in documents
-    ]
+    return PreparedIntake(
+        accepted=accepted,
+        rejected=rejected,
+        documents=documents,
+        results=results,
+        manifest_entries=manifest_entries,
+        paths=saved_paths,
+    )
 
 
 def _read_prefix(path: Path) -> bytes:
@@ -270,6 +282,14 @@ def _sha256_file(path: Path) -> str:
 def _fsync_file(path: Path) -> None:
     with path.open("rb") as handle:
         os.fsync(handle.fileno())
+
+
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _remove_paths(datadir: str | os.PathLike[str], paths: list[str]) -> None:
