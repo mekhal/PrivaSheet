@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 from io import BytesIO
 from pathlib import Path
@@ -58,6 +59,12 @@ def image_bytes(fmt: str) -> bytes:
 def pdf_bytes() -> bytes:
     stream = BytesIO()
     Image.new("RGB", (8, 8), color="white").save(stream, format="PDF")
+    return stream.getvalue()
+
+
+def tiff_bytes() -> bytes:
+    stream = BytesIO()
+    Image.new("RGB", (4, 5), color=(80, 30, 140)).save(stream, format="TIFF")
     return stream.getvalue()
 
 
@@ -153,6 +160,55 @@ def test_file_signature_controls_extension_not_source_name(conn, tmp_path):
     assert result.rejected == []
     assert get_document(conn, "doc_d1")["path"] == "process/doc_d1.png"
     assert (tmp_path / "process" / "doc_d1.png").exists()
+
+
+def test_tiff_upload_uses_tif_extension(conn, tmp_path):
+    result = create_batch(
+        conn,
+        tmp_path,
+        "invoice-a",
+        1,
+        [upload("scan.tiff", tiff_bytes())],
+        new_id=ids("b1", "d1", "r1"),
+    )
+
+    assert result.rejected == []
+    assert get_document(conn, "doc_d1")["path"] == "process/doc_d1.tif"
+    assert (tmp_path / "process" / "doc_d1.tif").exists()
+
+
+def test_accepted_file_and_process_directory_are_fsynced(conn, tmp_path, monkeypatch):
+    dir_fd = 99_001
+    fsynced: list[int] = []
+    opened: list[tuple[str, int]] = []
+
+    def fake_open(path, flags):
+        opened.append((str(path), flags))
+        return dir_fd
+
+    monkeypatch.setattr("privasheet.pipeline.intake.os.open", fake_open)
+    monkeypatch.setattr("privasheet.pipeline.intake.os.close", lambda fd: None)
+    monkeypatch.setattr(
+        "privasheet.pipeline.intake.os.fsync", lambda fd: fsynced.append(fd)
+    )
+
+    create_batch(
+        conn,
+        tmp_path,
+        "invoice-a",
+        1,
+        [upload("scan.png", image_bytes("PNG"))],
+        new_id=ids("b1", "d1", "r1"),
+    )
+
+    if hasattr(os, "O_DIRECTORY"):
+        assert len(fsynced) == 2
+        assert fsynced[0] != dir_fd
+        assert fsynced[1] == dir_fd
+        assert opened == [(str(tmp_path / "process"), os.O_RDONLY | os.O_DIRECTORY)]
+    else:
+        assert len(fsynced) == 1
+        assert opened == []
 
 
 def test_invalid_files_are_rejected_without_rows_or_files(conn, tmp_path):
@@ -271,6 +327,54 @@ def test_add_files_appends_to_manifest_order(conn, tmp_path):
         "second.png",
         "third.jpg",
     ]
+
+
+def test_add_files_with_only_rejections_keeps_batch_and_adds_no_rows(conn, tmp_path):
+    create_batch(
+        conn,
+        tmp_path,
+        "invoice-a",
+        1,
+        [upload("first.png", image_bytes("PNG"))],
+        new_id=ids("b1", "d1", "r1"),
+    )
+
+    result = add_files(
+        conn,
+        tmp_path,
+        "bat_b1",
+        [upload("notes.txt", b"plain text")],
+        new_id=ids("d2", "r2"),
+    )
+
+    assert result.batch_id == "bat_b1"
+    assert result.accepted == []
+    assert [(item.source_file, item.code) for item in result.rejected] == [
+        ("notes.txt", "UNSUPPORTED_TYPE")
+    ]
+    assert [doc["source_file"] for doc in get_batch(conn, "bat_b1")["documents"]] == [
+        "first.png"
+    ]
+    assert conn.execute("SELECT count(*) FROM documents").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM results").fetchone()[0] == 1
+    assert sorted(path.name for path in (tmp_path / "process").glob("*")) == [
+        "doc_d1.png"
+    ]
+
+
+def test_add_files_unknown_batch_is_store_error(conn, tmp_path):
+    with pytest.raises(StoreError, match="batch not found"):
+        add_files(
+            conn,
+            tmp_path,
+            "bat_missing",
+            [upload("scan.png", image_bytes("PNG"))],
+            new_id=ids("d1", "r1"),
+        )
+
+    assert not (tmp_path / "process").exists()
+    assert conn.execute("SELECT count(*) FROM documents").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM results").fetchone()[0] == 0
 
 
 def test_add_files_database_failure_removes_saved_files(conn, tmp_path):
