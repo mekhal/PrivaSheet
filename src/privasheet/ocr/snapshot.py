@@ -32,7 +32,7 @@ def normalize_boxes(
                 "quad": [
                     [_clamp(x / width), _clamp(y / height)] for x, y in raw_box.quad_px
                 ],
-                "score": float(raw_box.score),
+                "score": _clamp(raw_box.score),
             }
         )
     return boxes
