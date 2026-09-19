@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from privasheet.store import repo as store_repo
 
@@ -58,6 +58,8 @@ def _remove_orphans(conn: sqlite3.Connection, datadir: DataDir) -> tuple[int, in
     for managed_root in managed_roots:
         if not managed_root.exists():
             continue
+        if managed_root.is_symlink() or managed_root.resolve() != managed_root:
+            continue
         for current, dirs, files in os.walk(
             managed_root, topdown=False, followlinks=False
         ):
@@ -95,12 +97,29 @@ def _referenced_paths(
     referenced: set[Path] = set()
     for stored in store_repo.referenced_file_paths(conn):
         try:
-            path = datadir.resolve(stored)
+            path = _stored_path(datadir, stored)
         except DataDirError:
             continue
         if _is_in_managed_dir(path, managed_roots):
             referenced.add(path)
     return referenced
+
+
+def _stored_path(datadir: DataDir, stored: str) -> Path:
+    raw = os.fspath(stored)
+    if raw.startswith(("//", "\\\\")) or PureWindowsPath(raw).drive:
+        raise DataDirError("stored path must be relative to the data directory")
+    raw = raw.replace("\\", "/")
+    posix = PurePosixPath(raw)
+    if posix.is_absolute() or ".." in posix.parts:
+        raise DataDirError("stored path must be relative to the data directory")
+    root = datadir.root.resolve()
+    path = root / Path(*posix.parts)
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise DataDirError("stored path leaves the data directory") from exc
+    return path
 
 
 def _remove_file_if_orphan(
@@ -115,7 +134,10 @@ def _remove_file_if_orphan(
         return False
     if path in referenced:
         return False
-    path.unlink(missing_ok=True)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
     return True
 
 

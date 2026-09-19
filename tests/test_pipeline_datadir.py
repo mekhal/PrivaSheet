@@ -60,6 +60,17 @@ def test_resolve_refuses_paths_that_leave_root(tmp_path, stored):
         datadir.resolve(stored)
 
 
+def test_resolve_refuses_symlink_escape(tmp_path):
+    datadir = DataDir(tmp_path / "data")
+    datadir.prepare()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (datadir.pages / "link").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(DataDirError):
+        datadir.resolve("pages/link/x")
+
+
 def test_rel_refuses_paths_outside_root(tmp_path):
     datadir = DataDir(tmp_path / "data")
 
