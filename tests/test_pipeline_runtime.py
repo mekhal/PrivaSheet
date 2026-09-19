@@ -7,9 +7,10 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 import privasheet.__main__ as launcher
+import privasheet.pipeline.runtime as runtime_module
 from privasheet.ingest.checks import Limits
 from privasheet.llm import LlmConfigError
-from privasheet.pipeline.datadir import AlreadyRunning, DataDir
+from privasheet.pipeline.datadir import AlreadyRunning, DataDir, DataDirError
 from privasheet.pipeline.intake import Upload, create_batch
 from privasheet.pipeline.runtime import PipelineRuntime
 from privasheet.store import migrate, open_db
@@ -87,6 +88,27 @@ def lock_is_free(datadir):
     return True
 
 
+def submit_batch(datadir):
+    conn = open_db(datadir.db_path)
+    try:
+        insert_template(conn, template_doc())
+        streams = []
+        uploads = []
+        for name in ("one.png", "two.png"):
+            path = datadir.process / name
+            Image.new("RGB", (10, 12), (len(name), 90, 120)).save(path, format="PNG")
+            stream = path.open("rb")
+            streams.append(stream)
+            uploads.append(Upload(name, stream))
+        try:
+            create_batch(conn, datadir.root, "invoice-a", 1, uploads, limits=Limits())
+        finally:
+            for stream in streams:
+                stream.close()
+    finally:
+        conn.close()
+
+
 def test_start_creates_layout_migrates_and_starts_worker(tmp_path):
     runtime = make_runtime(tmp_path)
     datadir = DataDir(tmp_path / "data")
@@ -135,8 +157,6 @@ def test_bad_data_dir_refuses_start(tmp_path, monkeypatch):
     onedrive = tmp_path / "OneDrive"
     monkeypatch.setenv("OneDrive", os.fspath(onedrive))
     runtime = make_runtime(tmp_path, data_dir=onedrive / "data")
-    from privasheet.pipeline.datadir import DataDirError
-
     with pytest.raises(DataDirError):
         runtime.start()
 
@@ -149,6 +169,31 @@ def test_stop_twice_is_fine_and_frees_the_lock(tmp_path):
     assert lock_is_free(DataDir(tmp_path / "data"))
 
 
+def test_stop_keeps_the_lock_while_the_worker_is_still_processing(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(runtime_module, "STOP_TIMEOUT_S", 0.1)
+    llm = FakeLlmClient()
+    runtime = make_runtime(tmp_path, llm=llm)
+    datadir = DataDir(tmp_path / "data")
+    runtime.start()
+    try:
+        submit_batch(datadir)
+        assert llm.entered.wait(5)
+        with pytest.raises(RuntimeError, match="did not stop"):
+            runtime.stop()
+        assert runtime.status()["worker"] == "running"
+        assert not lock_is_free(datadir)
+        with pytest.raises(AlreadyRunning):
+            make_runtime(tmp_path).start()
+    finally:
+        llm.release.set()
+        monkeypatch.setattr(runtime_module, "STOP_TIMEOUT_S", 5)
+        runtime.stop()
+    assert runtime.status()["worker"] == "stopped"
+    assert lock_is_free(datadir)
+
+
 def test_stop_without_start_is_fine(tmp_path):
     make_runtime(tmp_path).stop()
 
@@ -159,28 +204,7 @@ def test_status_endpoint_reports_worker_and_queue_counts(tmp_path):
     app = create_app(make_settings(tmp_path), runtime)
     datadir = DataDir(tmp_path / "data")
     with TestClient(app) as client:
-        conn = open_db(datadir.db_path)
-        try:
-            insert_template(conn, template_doc())
-            streams = []
-            uploads = []
-            for name in ("one.png", "two.png"):
-                path = datadir.process / name
-                Image.new("RGB", (10, 12), (len(name), 90, 120)).save(
-                    path, format="PNG"
-                )
-                stream = path.open("rb")
-                streams.append(stream)
-                uploads.append(Upload(name, stream))
-            try:
-                create_batch(
-                    conn, datadir.root, "invoice-a", 1, uploads, limits=Limits()
-                )
-            finally:
-                for stream in streams:
-                    stream.close()
-        finally:
-            conn.close()
+        submit_batch(datadir)
 
         assert llm.entered.wait(5)
         response = client.get("/api/pipeline/status")
@@ -242,6 +266,11 @@ def test_build_app_wires_a_runtime_through_the_lifespan(tmp_path):
     assert isinstance(runtime, PipelineRuntime)
     assert app.state.settings == settings
     assert runtime.status()["worker"] == "stopped"
+    with TestClient(app) as client:
+        assert client.get("/api/pipeline/status").json()["worker"] == "running"
+        assert runtime.status()["worker"] == "running"
+    assert runtime.status()["worker"] == "stopped"
+    assert lock_is_free(DataDir(tmp_path / "data"))
 
 
 def test_main_reports_a_refusal_in_one_line_and_exits_1(tmp_path, monkeypatch, capsys):
@@ -271,3 +300,32 @@ def test_main_runs_uvicorn_on_configured_address(tmp_path, monkeypatch):
     )
     assert launcher.main() == 0
     assert calls[0][1:] == ("127.0.0.1", 9001)
+
+
+@pytest.mark.parametrize("outcome", ["returns", "exits"])
+def test_main_reports_a_refusal_however_uvicorn_ends(
+    tmp_path, monkeypatch, capsys, outcome
+):
+    settings = make_settings(tmp_path, base_url="http://llm.example.com:11434")
+    monkeypatch.setattr(launcher, "load_settings", lambda: settings)
+
+    def fake_run(app, host, port):
+        with pytest.raises(LlmConfigError), TestClient(app):
+            pass
+        if outcome == "exits":
+            raise SystemExit(3)
+
+    monkeypatch.setattr(launcher.uvicorn, "run", fake_run)
+    assert launcher.main() == 1
+    assert "cannot start" in capsys.readouterr().err
+
+
+def test_main_reraises_an_unrelated_exit(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "load_settings", lambda: make_settings(tmp_path))
+
+    def fake_run(app, host, port):
+        raise SystemExit(2)
+
+    monkeypatch.setattr(launcher.uvicorn, "run", fake_run)
+    with pytest.raises(SystemExit):
+        launcher.main()
