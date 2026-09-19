@@ -44,12 +44,46 @@ def _batch_manifest(conn: sqlite3.Connection, batch_id: str) -> dict:
     return loads(row["doc"])
 
 
+def get_document(conn: sqlite3.Connection, document_id: str) -> dict | None:
+    """Return one document row, or None when absent."""
+    row = conn.execute(
+        "SELECT document_id, sha256, source_file, path, snapshot_id "
+        "FROM documents WHERE document_id = ?",
+        (document_id,),
+    ).fetchone()
+    return None if row is None else _document_row(row)
+
+
+def get_batch(conn: sqlite3.Connection, batch_id: str) -> dict | None:
+    """Return one batch manifest, or None when absent."""
+    row = conn.execute(
+        "SELECT doc FROM batches WHERE batch_id = ?", (batch_id,)
+    ).fetchone()
+    return _load_one(row)
+
+
+def list_batches(conn: sqlite3.Connection) -> list[dict]:
+    """Return batch manifests ordered by creation time then id."""
+    rows = conn.execute(
+        "SELECT doc FROM batches ORDER BY created_at ASC, batch_id ASC"
+    ).fetchall()
+    return [loads(row["doc"]) for row in rows]
+
+
 def _result_for_document(
     conn: sqlite3.Connection, batch_id: str, document_id: str
 ) -> dict | None:
     row = conn.execute(
         "SELECT doc FROM results WHERE batch_id = ? AND document_id = ?",
         (batch_id, document_id),
+    ).fetchone()
+    return _load_one(row)
+
+
+def find_result_for_document(conn: sqlite3.Connection, document_id: str) -> dict | None:
+    """Return the result for a document id, or None when absent."""
+    row = conn.execute(
+        "SELECT doc FROM results WHERE document_id = ?", (document_id,)
     ).fetchone()
     return _load_one(row)
 
@@ -110,6 +144,22 @@ def _remove_from_manifest(manifest: dict, document_id: str) -> dict:
             if doc.get("document_id") != document_id
         ],
     }
+
+
+def _queued_results_in_processing_order(
+    conn: sqlite3.Connection,
+) -> Iterator[dict]:
+    rows = conn.execute(
+        "SELECT batch_id, doc FROM batches ORDER BY created_at ASC, batch_id ASC"
+    ).fetchall()
+    for row in rows:
+        manifest = loads(row["doc"])
+        for document in manifest.get("documents", []):
+            result = _result_for_document(
+                conn, row["batch_id"], document["document_id"]
+            )
+            if result is not None and result.get("status") == "queued":
+                yield result
 
 
 def insert_template(conn: sqlite3.Connection, doc: dict) -> None:
@@ -306,15 +356,16 @@ def update_result_review(
     doc: dict,
 ) -> bool:
     """Replace a result from a review save when the expected revision matches."""
-    cursor = conn.execute(
-        "UPDATE results SET doc = ? WHERE result_id = ? AND revision = ?",
-        (
-            dumps(_with_next_revision(doc, expected_revision)),
-            result_id,
-            expected_revision,
-        ),
-    )
-    return cursor.rowcount == 1
+    with transaction(conn):
+        cursor = conn.execute(
+            "UPDATE results SET doc = ? WHERE result_id = ? AND revision = ?",
+            (
+                dumps(_with_next_revision(doc, expected_revision)),
+                result_id,
+                expected_revision,
+            ),
+        )
+        return cursor.rowcount == 1
 
 
 def commit_worker_outcome(
@@ -325,16 +376,130 @@ def commit_worker_outcome(
     doc: dict,
 ) -> bool:
     """Replace a result from a worker outcome when revision and job match."""
-    cursor = conn.execute(
-        "UPDATE results SET doc = ? WHERE result_id = ? AND revision = ? AND job = ?",
-        (
-            dumps(_with_next_revision(doc, expected_revision)),
-            result_id,
-            expected_revision,
-            expected_job,
-        ),
-    )
-    return cursor.rowcount == 1
+    with transaction(conn):
+        cursor = conn.execute(
+            "UPDATE results SET doc = ? WHERE result_id = ? AND revision = ? AND job = ?",
+            (
+                dumps(_with_next_revision(doc, expected_revision)),
+                result_id,
+                expected_revision,
+                expected_job,
+            ),
+        )
+        return cursor.rowcount == 1
+
+
+def claim_next_queued(conn: sqlite3.Connection, now: str) -> dict | None:
+    """Move the next queued result to processing and return the updated result."""
+    with transaction(conn):
+        result = next(_queued_results_in_processing_order(conn), None)
+        if result is None:
+            return None
+        claimed = {
+            **result,
+            "status": "processing",
+            "updated_at": now,
+            "revision": result["revision"] + 1,
+        }
+        conn.execute(
+            "UPDATE results SET doc = ? WHERE result_id = ?",
+            (dumps(claimed), result["result_id"]),
+        )
+        return claimed
+
+
+def reset_processing_to_queued(conn: sqlite3.Connection, now: str) -> list[str]:
+    """Recover in-flight results by returning processing jobs to the queue."""
+    reset_ids: list[str] = []
+    with transaction(conn):
+        rows = conn.execute(
+            "SELECT result_id, doc FROM results "
+            "WHERE status = 'processing' ORDER BY result_id ASC"
+        ).fetchall()
+        for row in rows:
+            result = loads(row["doc"])
+            reset = {
+                **result,
+                "status": "queued",
+                "revision": result["revision"] + 1,
+                "updated_at": now,
+            }
+            conn.execute(
+                "UPDATE results SET doc = ? WHERE result_id = ?",
+                (dumps(reset), row["result_id"]),
+            )
+            reset_ids.append(row["result_id"])
+    return reset_ids
+
+
+def retry_result(
+    conn: sqlite3.Connection,
+    result_id: str,
+    expected_revision: int,
+    now: str,
+) -> bool:
+    """Requeue a failed or unreviewed needs-review result for another worker job."""
+    with transaction(conn):
+        row = conn.execute(
+            "SELECT doc FROM results WHERE result_id = ? AND revision = ?",
+            (result_id, expected_revision),
+        ).fetchone()
+        result = _load_one(row)
+        if result is None:
+            return False
+        if result.get("status") not in {"failed", "needs_review"}:
+            return False
+        if result.get("review") is not None:
+            return False
+        retried = {
+            **result,
+            "status": "queued",
+            "extracted": None,
+            "issues": [],
+            "error": None,
+            "revision": result["revision"] + 1,
+            "job": result["job"] + 1,
+            "updated_at": now,
+        }
+        conn.execute(
+            "UPDATE results SET doc = ? WHERE result_id = ?",
+            (dumps(retried), result_id),
+        )
+        return True
+
+
+def set_document_snapshot(
+    conn: sqlite3.Connection, document_id: str, snapshot_id: str
+) -> None:
+    """Attach an existing snapshot to an existing document row."""
+    with transaction(conn):
+        cursor = conn.execute(
+            "UPDATE documents SET snapshot_id = ? WHERE document_id = ?",
+            (snapshot_id, document_id),
+        )
+        if cursor.rowcount != 1:
+            raise StoreError("document not found")
+
+
+def referenced_file_paths(conn: sqlite3.Connection) -> set[str]:
+    """Return all stored document and snapshot image paths."""
+    paths = {
+        row["path"]
+        for row in conn.execute(
+            "SELECT path FROM documents WHERE path IS NOT NULL"
+        ).fetchall()
+    }
+    for row in conn.execute("SELECT doc FROM snapshots").fetchall():
+        paths.update(_snapshot_image_paths(loads(row["doc"])))
+    return paths
+
+
+def count_results_by_status(conn: sqlite3.Connection) -> dict[str, int]:
+    """Count results grouped by status."""
+    rows = conn.execute(
+        "SELECT status, count(*) AS count FROM results GROUP BY status"
+    ).fetchall()
+    return {row["status"]: row["count"] for row in rows}
 
 
 def update_document_path(conn: sqlite3.Connection, document_id: str, path: str) -> None:
