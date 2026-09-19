@@ -1091,3 +1091,61 @@ declared version is one we control.
 - The OCR models ship inside the rapidocr wheel (rapidocr/models/*.onnx) and the adapter finds them there, so this
   adds no model download and nothing is fetched at run time. Do not add any model download step.
 """
+
+[[task]]
+id = "DIAG-01"
+title = "self-check: python -m privasheet --check"
+tier = "green"
+review = "joint"
+paths = ["src/privasheet/selfcheck.py", "src/privasheet/__main__.py", "README.md",
+         "tests/test_selfcheck.py"]
+depends_on = ["DEP-01"]
+body = """
+Today a new installation only reveals what is missing one failure at a time, and some failures appear as a document
+that ends `failed` long after the install. Spec section 8 already promises a self-check as part of the planned
+installer; this task builds the check itself, usable on its own. Maintainer decision 2026-09-19.
+
+`python -m privasheet --check` runs every check, prints one table, and exits 0 when nothing is in error, 1 otherwise.
+Starting the server stays the default with no arguments; `--check` never starts the web server or the worker and
+never processes a document.
+
+src/privasheet/selfcheck.py
+- `run_checks(settings) -> list[CheckResult]`, with `CheckResult(name, status, detail)` and status one of
+  "ok" | "error" | "info". Pure and importable: it takes settings, returns results, prints nothing.
+- `format_table(results) -> str` renders fixed-width columns with a header, so the output is readable in a plain
+  console (no colour, no unicode box drawing: this runs in cmd.exe).
+- The checks, in this order, each one row:
+  1. python — the running version against requires-python in pyproject.
+  2. data directory — DataDir.check_location on settings.data_dir, then that it exists or can be created and is
+     writable. A directory locked by a running PrivaSheet is "info", with the wording "in use by a running
+     PrivaSheet", not an error: the user is allowed to check while it runs.
+  3. database — open and migrate it only when the directory is not in use, and close it again; report the schema
+     version. When it is in use, report "info: skipped, data directory in use".
+  4. ocr engine — import rapidocr and onnxruntime and report their versions.
+  5. ocr models — build the engine and report the model file names it resolved, which is what proves no download
+     is needed at run time.
+  6. llm server — the configured base_url, then one real call through llm.LlmClient with a trivial prompt and a
+     short timeout. LlmUnavailable is an error whose detail says the server did not answer; LlmConfigError is an
+     error naming the rule that was broken.
+  7. llm model — carried by the same call: report the model that answered, or that the configured model is not
+     available on that server.
+  8. web port — whether settings.host:port can be bound right now, or is already taken.
+- Each error detail says what to do in one short sentence, in the same words as the README troubleshooting table.
+- No check may raise: an unexpected exception becomes an error row naming the exception class.
+
+src/privasheet/__main__.py
+- Parse arguments with argparse: no arguments starts the server exactly as today, `--check` runs the checks. Keep
+  the current refusal handling for the server path unchanged.
+
+tests/test_selfcheck.py
+- Drive run_checks with fakes and temporary directories, never the real OCR engine or a real LLM server.
+- Cover: every check "ok" gives exit code 0; a data directory inside OneDrive is an error (set the OneDrive
+  environment variable in the test, as tests/test_pipeline_datadir.py does); a missing rapidocr is an error and
+  does not stop the later checks from running; an unavailable LLM is an error and the table still lists every row;
+  a locked data directory is "info", not an error, and the exit code stays 0; format_table lines up the columns
+  when a detail is long.
+
+README.md
+- One short paragraph after step 4: run `python -m privasheet --check` to see what is ready and what is not. Show
+  the table's shape in a fenced block. Change nothing else in README.md.
+"""
