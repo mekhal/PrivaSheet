@@ -232,6 +232,97 @@ DEMO_OVERLAY_DATA = {
     "result": {"highlighted_box_ids": ["p1-b4"]},
 }
 
+DEMO_REVIEW_DATA = {
+    "result": {
+        "document_id": "doc_needs_review",
+        "document_label": "synthetic_invoice_003.pdf",
+        "status": "needs_review",
+        "revision": 1,
+        "schema": {
+            "fields": [
+                {
+                    "key": "invoice_no",
+                    "label": "Invoice number",
+                    "type": "string",
+                    "required": True,
+                },
+                {
+                    "key": "date",
+                    "label": "Date",
+                    "type": "date",
+                    "required": True,
+                },
+                {
+                    "key": "total",
+                    "label": "Total",
+                    "type": "decimal",
+                    "required": True,
+                },
+                {
+                    "key": "tax",
+                    "label": "Tax",
+                    "type": "decimal",
+                    "required": False,
+                },
+            ],
+            "tables": [
+                {
+                    "key": "line_items",
+                    "label": "Line items",
+                    "columns": [
+                        {
+                            "key": "description",
+                            "label": "Description",
+                            "type": "string",
+                            "required": True,
+                        },
+                        {
+                            "key": "amount",
+                            "label": "Amount",
+                            "type": "decimal",
+                            "required": True,
+                        },
+                    ],
+                }
+            ],
+        },
+        "extracted": {
+            "fields": {
+                "invoice_no": {"value": "INV-0042"},
+                "date": {"value": "2026-09-18"},
+                "total": {"value": "1284.00"},
+                "tax": {"value": None},
+            },
+            "tables": {
+                "line_items": [
+                    {
+                        "description": {"value": "Synthetic service"},
+                        "amount": {"value": "1284.00"},
+                    },
+                    {
+                        "description": {"value": "Addendum review"},
+                        "amount": {"value": "0.00"},
+                    },
+                ]
+            },
+        },
+        "issues": [
+            {
+                "code": "AI_UNCERTAIN",
+                "target": "fields.total",
+                "message": "The model assigned low confidence to the total.",
+            },
+            {
+                "code": "DUPLICATE_DOCUMENT",
+                "target": "document",
+                "document_id": "doc_passed",
+                "message": "This document resembles an earlier upload.",
+            },
+        ],
+        "review": None,
+    }
+}
+
 
 class LocalStaticFiles:
     def __init__(self, directory: Path) -> None:
@@ -378,6 +469,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "active": "/review",
                 "settings": settings,
                 "overlay_data": DEMO_OVERLAY_DATA,
+                "review_data": DEMO_REVIEW_DATA,
             },
         )
 
@@ -412,6 +504,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "active": "/review",
                 "settings": settings,
                 "overlay_data": DEMO_OVERLAY_DATA,
+            },
+        )
+
+    @app.get("/demo/review", response_class=HTMLResponse)
+    async def review_demo_page(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "review_demo.html",
+            {
+                "title": "Review demo",
+                "active": "/review",
+                "settings": settings,
+                "overlay_data": DEMO_OVERLAY_DATA,
+                "review_data": DEMO_REVIEW_DATA,
             },
         )
 
