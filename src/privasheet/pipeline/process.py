@@ -65,28 +65,35 @@ def process_document(
         )
 
     snapshot_id = result.get("snapshot_id") or document.get("snapshot_id")
-    snapshot = repo.get_snapshot(conn, snapshot_id) if snapshot_id else None
 
     try:
-        if snapshot is None:
-            snapshot = _ocr_snapshot(
-                conn,
-                Path(datadir),
-                document,
-                limits,
-                _remaining_budget(started_at, timeout_s, clock),
-                ocr_engine or DEFAULT_OCR_ENGINE,
-                now(),
-                cancel,
-            )
-            snapshot_id = snapshot["snapshot_id"]
+        snapshot = _ocr_snapshot(
+            conn,
+            Path(datadir),
+            document,
+            limits,
+            _remaining_budget(started_at, timeout_s, clock),
+            ocr_engine or DEFAULT_OCR_ENGINE,
+            now(),
+            cancel,
+        )
+        snapshot_id = snapshot["snapshot_id"]
 
-        deadline = started_at + timeout_s
-        if clock() >= deadline:
+        remaining_s = _remaining_budget(started_at, timeout_s, clock)
+        if remaining_s <= 0:
             return _timeout_outcome(
-                result, model, snapshot_id, "LLM", None, started_at, clock, now
+                result,
+                model,
+                snapshot_id,
+                "LLM",
+                None,
+                started_at,
+                timeout_s,
+                clock,
+                now,
             )
 
+        deadline = time.monotonic() + remaining_s
         extracted = extractor.extract(template, snapshot, llm_client, deadline)
         values, issues = checks.check_extraction(template, snapshot, extracted)
         extracted = _with_canonical_values(extracted, values)
@@ -105,12 +112,20 @@ def process_document(
         raise
     except OcrTimeout as exc:
         return _timeout_outcome(
-            result, model, snapshot_id, "OCR", exc, started_at, clock, now
+            result, model, snapshot_id, "OCR", exc, started_at, timeout_s, clock, now
         )
     except llm.LlmTimeout as exc:
-        if clock() >= started_at + timeout_s:
+        if _remaining_budget(started_at, timeout_s, clock) <= 0:
             return _timeout_outcome(
-                result, model, snapshot_id, "LLM", None, started_at, clock, now
+                result,
+                model,
+                snapshot_id,
+                "LLM",
+                None,
+                started_at,
+                timeout_s,
+                clock,
+                now,
             )
         return _failed_outcome(
             result, model, snapshot_id, "LLM_UNAVAILABLE", str(exc), now
@@ -163,7 +178,9 @@ def _ocr_snapshot(
 ) -> dict:
     path = datadir / document["path"]
     kind = _kind(path)
-    with tempfile.TemporaryDirectory(dir=datadir) as tmpdir:
+    tmp_root = datadir / "tmp" / "ocr"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="job-", dir=tmp_root) as tmpdir:
         job = run_ocr_job(
             path,
             kind,
@@ -241,7 +258,10 @@ def _remaining_budget(started_at, timeout_s, clock) -> float:
     return max(0.0, started_at + timeout_s - clock())
 
 
-def _timeout_outcome(result, model, snapshot_id, stage, exc, started_at, clock, now):
+def _timeout_outcome(
+    result, model, snapshot_id, stage, exc, started_at, timeout_s, clock, now
+):
+    stage = _format_stage(getattr(exc, "stage", None) or stage)
     elapsed_s = getattr(exc, "elapsed_s", None)
     if elapsed_s is None:
         elapsed_s = max(0.0, clock() - started_at)
@@ -253,7 +273,7 @@ def _timeout_outcome(result, model, snapshot_id, stage, exc, started_at, clock, 
     else:
         progress = f" ({_format_seconds(elapsed_s)})"
     detail = (
-        f"{stage} did not finish within the processing budget{progress}. "
+        f"{stage} did not finish within {_format_duration(timeout_s)}{progress}. "
         "Enter values by hand or retry."
     )
     return _outcome(
@@ -276,6 +296,18 @@ def _timeout_outcome(result, model, snapshot_id, stage, exc, started_at, clock, 
 
 def _format_seconds(seconds: float) -> str:
     return f"{round(seconds)} s"
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return _format_seconds(seconds)
+    return f"{seconds / 60:g} minutes"
+
+
+def _format_stage(stage) -> str:
+    if str(stage).lower() in {"llm", "ocr"}:
+        return str(stage).upper()
+    return str(stage).capitalize()
 
 
 def _failed_outcome(result, model, snapshot_id, code, detail, now):
