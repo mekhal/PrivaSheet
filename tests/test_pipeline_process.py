@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import Event
 
 import pytest
 from PIL import Image
@@ -7,6 +8,7 @@ from PIL.PngImagePlugin import PngInfo
 from privasheet.ingest.checks import Limits
 from privasheet.llm import LlmInvalidResponse, LlmTimeout, LlmUnavailable
 from privasheet.ocr.engine import RawBox
+from privasheet.ocr.runner import OcrCancelled
 from privasheet.pipeline.datadir import DataDir
 from privasheet.pipeline.intake import Upload, create_batch
 from privasheet.pipeline.process import process_document
@@ -53,6 +55,39 @@ class FakeLlmClient:
         if isinstance(response, BaseException):
             raise response
         return response
+
+
+class FakeClock:
+    def __init__(self, value):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
+
+
+class StepClock:
+    def __init__(self, *values):
+        self.values = list(values)
+
+    def __call__(self):
+        if len(self.values) > 1:
+            return self.values.pop(0)
+        return self.values[0]
+
+
+class AdvancingTimeoutLlmClient(FakeLlmClient):
+    def __init__(self, clock, seconds):
+        super().__init__()
+        self.clock = clock
+        self.seconds = seconds
+
+    def chat_json(self, messages, timeout=None):
+        self.calls.append({"messages": messages, "timeout": timeout})
+        self.clock.advance(self.seconds)
+        raise LlmTimeout("upstream timeout")
 
 
 class HighConfidenceOcrEngine:
@@ -328,7 +363,7 @@ def test_ocr_timeout_returns_processing_timeout_and_cleans_tempdir(store):
     assert issue["code"] == PROCESSING_TIMEOUT
     assert "OCR" in issue["detail"]
     assert "1 s" in issue["detail"]
-    assert not list(datadir.root.glob("tmp*"))
+    assert_no_tempdirs(datadir)
 
 
 def test_identical_page_pixels_reuse_existing_snapshot_without_second_row(store):
@@ -350,23 +385,146 @@ def test_identical_page_pixels_reuse_existing_snapshot_without_second_row(store)
 def test_budget_spent_before_llm_returns_timeout_with_snapshot_kept(store):
     conn, datadir = store
     result = claim_upload(conn, datadir)
-    ticks = iter([100.0, 100.0, 131.0, 131.0])
+    clock = StepClock(100.0, 100.0, 131.0)
+    client = FakeLlmClient(valid_response())
 
     outcome = process_document(
         conn,
         datadir.root,
         result,
         template_doc(),
-        llm_client=FakeLlmClient(valid_response()),
+        llm_client=client,
         model="fake-model",
         limits=Limits(),
         timeout_s=30,
         ocr_engine=OCR_ENGINE,
         now=lambda: "2026-09-19T00:02:00Z",
-        clock=lambda: next(ticks),
+        clock=clock,
     )
 
     assert outcome["status"] == "needs_review"
     assert outcome["snapshot_id"] is not None
+    assert client.calls == []
     assert outcome["issues"][0]["code"] == PROCESSING_TIMEOUT
     assert "LLM" in outcome["issues"][0]["detail"]
+
+
+def test_llm_deadline_uses_real_monotonic_remaining_budget(store):
+    conn, datadir = store
+    result = claim_upload(conn, datadir)
+    client = FakeLlmClient(valid_response())
+
+    outcome = process_document(
+        conn,
+        datadir.root,
+        result,
+        template_doc(),
+        llm_client=client,
+        model="fake-model",
+        limits=Limits(),
+        timeout_s=30,
+        ocr_engine=OCR_ENGINE,
+        now=lambda: "2026-09-19T00:02:00Z",
+        clock=StepClock(100.0, 100.0, 105.0),
+    )
+
+    assert outcome["status"] == "passed"
+    assert 20 <= client.calls[0]["timeout"] <= 30
+
+
+def test_llm_timeout_after_budget_spent_returns_processing_timeout(store):
+    conn, datadir = store
+    result = claim_upload(conn, datadir)
+    clock = FakeClock(100.0)
+    client = AdvancingTimeoutLlmClient(clock, 31.0)
+
+    outcome = process_document(
+        conn,
+        datadir.root,
+        result,
+        template_doc(),
+        llm_client=client,
+        model="fake-model",
+        limits=Limits(),
+        timeout_s=30,
+        ocr_engine=OCR_ENGINE,
+        now=lambda: "2026-09-19T00:02:00Z",
+        clock=clock,
+    )
+
+    assert outcome["status"] == "needs_review"
+    assert outcome["snapshot_id"] is not None
+    assert outcome["extracted"] is None
+    assert outcome["error"] is None
+    assert outcome["issues"] == [
+        {
+            "code": PROCESSING_TIMEOUT,
+            "target": "document",
+            "detail": outcome["issues"][0]["detail"],
+        }
+    ]
+    assert "LLM" in outcome["issues"][0]["detail"]
+
+
+def test_cancelled_ocr_propagates_to_caller(store):
+    conn, datadir = store
+    result = claim_upload(conn, datadir)
+    cancel = Event()
+    cancel.set()
+
+    with pytest.raises(OcrCancelled):
+        process_document(
+            conn,
+            datadir.root,
+            result,
+            template_doc(),
+            llm_client=FakeLlmClient(valid_response()),
+            model="fake-model",
+            limits=Limits(),
+            timeout_s=30,
+            ocr_engine=SLEEPING_OCR_ENGINE,
+            now=lambda: "2026-09-19T00:02:00Z",
+            cancel=cancel,
+        )
+
+    assert_no_tempdirs(datadir)
+
+
+def test_success_duplicate_and_failure_leave_no_tempdirs(store):
+    conn, datadir = store
+    first = claim_upload(conn, datadir, "first.png")
+    first_outcome = run_process(conn, datadir, first, FakeLlmClient(valid_response()))
+    assert_no_tempdirs(datadir)
+    assert commit_worker_outcome(
+        conn, first_outcome["result_id"], first["revision"], first["job"], first_outcome
+    )
+
+    duplicate = claim_upload(conn, datadir, "duplicate.png")
+    duplicate_outcome = run_process(
+        conn,
+        datadir,
+        duplicate,
+        FakeLlmClient(valid_response()),
+        engine=RAISING_OCR_ENGINE,
+    )
+    assert duplicate_outcome["issues"][0]["code"] == DUPLICATE_DOCUMENT
+    assert_no_tempdirs(datadir)
+
+    failure = claim_upload(
+        conn, datadir, "failure.png", size=(11, 13), comment="unique"
+    )
+    failed_outcome = run_process(
+        conn,
+        datadir,
+        failure,
+        FakeLlmClient(valid_response()),
+        engine=RAISING_OCR_ENGINE,
+    )
+    assert failed_outcome["status"] == "failed"
+    assert_no_tempdirs(datadir)
+
+
+def assert_no_tempdirs(datadir):
+    tmp_root = datadir.root / "tmp" / "ocr"
+    if tmp_root.exists():
+        assert list(tmp_root.iterdir()) == []
