@@ -94,7 +94,7 @@ def create_batch(
             "documents": intake.manifest_entries,
         }
         repo.create_batch(conn, manifest, intake.documents, intake.results)
-    except BaseException:
+    except Exception:
         _remove_paths(datadir, intake.paths)
         raise
 
@@ -141,7 +141,7 @@ def add_files(
 
     try:
         repo.add_documents_to_batch(conn, batch_id, intake.documents, intake.results)
-    except BaseException:
+    except Exception:
         _remove_paths(datadir, intake.paths)
         raise
 
@@ -280,12 +280,14 @@ def _sha256_file(path: Path) -> str:
 
 
 def _fsync_file(path: Path) -> None:
-    with path.open("rb") as handle:
+    with path.open("r+b") as handle:
         os.fsync(handle.fileno())
 
 
 def _fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)
     finally:
