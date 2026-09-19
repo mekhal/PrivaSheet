@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,10 +57,15 @@ def rapidocr_result_to_raw_boxes(result) -> list[RawBox]:
     if boxes is None:
         return []
 
-    txts = getattr(result, "txts", [])
-    scores = getattr(result, "scores", [])
+    txts = getattr(result, "txts", None)
+    scores = getattr(result, "scores", None)
+    if txts is None or scores is None:
+        raise OcrError("OCR_FAILED", "RapidOCR result length mismatch.")
+    if len(boxes) != len(txts) or len(boxes) != len(scores):
+        raise OcrError("OCR_FAILED", "RapidOCR result length mismatch.")
+
     raw_boxes = []
-    for quad, text, score in zip(boxes, txts, scores, strict=False):
+    for quad, text, score in zip(boxes, txts, scores, strict=True):
         raw_boxes.append(
             RawBox(
                 quad_px=tuple((float(x), float(y)) for x, y in quad),
@@ -86,35 +92,29 @@ class RapidOcrEngine:
             rapidocr = importlib.import_module("rapidocr")
         except ImportError as exc:
             package = exc.name or "rapidocr"
-            raise OcrError(
-                "OCR_FAILED", f"Missing OCR package {package}: {exc}."
-            ) from exc
+            raise OcrError("OCR_FAILED", f"Missing OCR package {package}.") from exc
         except Exception as exc:
             raise OcrError(
-                "OCR_FAILED", f"Could not import OCR package rapidocr: {exc}."
+                "OCR_FAILED",
+                f"Could not import OCR package rapidocr ({type(exc).__name__}).",
             ) from exc
 
         try:
             self._numpy = importlib.import_module("numpy")
         except ImportError as exc:
             package = exc.name or "numpy"
-            raise OcrError(
-                "OCR_FAILED", f"Missing OCR package {package}: {exc}."
-            ) from exc
+            raise OcrError("OCR_FAILED", f"Missing OCR package {package}.") from exc
         except Exception as exc:
             raise OcrError(
-                "OCR_FAILED", f"Could not import OCR package numpy: {exc}."
+                "OCR_FAILED",
+                f"Could not import OCR package numpy ({type(exc).__name__}).",
             ) from exc
 
         self.version = str(getattr(rapidocr, "__version__", "unknown"))
         try:
             effective_config = dict(config or {})
             model_paths = _resolve_model_paths(rapidocr, model_dir, data_dir)
-            engine_params = {
-                **effective_config,
-                **_rapidocr_model_params(model_paths),
-                "download": False,
-            }
+            engine_params = _rapidocr_constructor_params(model_paths, effective_config)
             engine_class = rapidocr.RapidOCR
             self._engine = engine_class(**engine_params)
             self._models = _model_digests(model_paths.values())
@@ -123,15 +123,15 @@ class RapidOcrEngine:
             self.config_sha256 = _config_sha256(
                 self._models,
                 {
-                    "download": False,
-                    "options": effective_config,
+                    "params": engine_params["params"],
                 },
             )
         except OcrError:
             raise
         except Exception as exc:
             raise OcrError(
-                "OCR_FAILED", f"Could not initialize RapidOCR: {exc}."
+                "OCR_FAILED",
+                f"Could not initialize RapidOCR ({type(exc).__name__}).",
             ) from exc
 
     def models(self) -> list[dict[str, str]]:
@@ -146,7 +146,8 @@ class RapidOcrEngine:
             raise
         except Exception as exc:
             raise OcrError(
-                "OCR_FAILED", f"RapidOCR recognition failed: {exc}."
+                "OCR_FAILED",
+                f"RapidOCR recognition failed ({type(exc).__name__}).",
             ) from exc
 
 
@@ -172,14 +173,18 @@ def _resolve_model_paths(
     data_dir: str | Path | None,
 ) -> dict[str, Path]:
     roots = _allowed_model_roots(rapidocr_module, model_dir, data_dir)
-    candidates = sorted(
-        path for root in roots for path in root.rglob("*") if _is_model_file(path)
-    )
     by_role: dict[str, Path] = {}
-    for path in candidates:
-        role = _model_role(path)
-        if role and role not in by_role:
-            by_role[role] = path.resolve()
+    for root in roots:
+        root_candidates = _model_candidates_by_role(root)
+        for role, paths in root_candidates.items():
+            if role in by_role:
+                continue
+            if len(paths) > 1:
+                raise OcrError(
+                    "OCR_FAILED",
+                    f"Ambiguous OCR model {role} under {root}.",
+                )
+            by_role[role] = paths[0].resolve()
 
     missing = [role for role in ("det", "rec") if role not in by_role]
     if missing:
@@ -197,12 +202,18 @@ def _allowed_model_roots(
     data_dir: str | Path | None,
 ) -> tuple[Path, ...]:
     roots = []
+
+    if model_dir is not None:
+        roots.append(Path(model_dir).resolve())
+
+    for directory in (data_dir, _default_data_dir()):
+        if directory is not None:
+            roots.append(Path(directory).resolve() / "models")
+
     module_file = getattr(rapidocr_module, "__file__", None)
     if module_file:
         roots.append(Path(module_file).resolve().parent)
-    for directory in (model_dir, data_dir, _default_data_dir()):
-        if directory is not None:
-            roots.append(Path(directory).resolve())
+
     return tuple(dict.fromkeys(root for root in roots if root.exists()))
 
 
@@ -224,21 +235,33 @@ def _is_model_file(path: Path) -> bool:
 
 
 def _model_role(path: Path) -> str | None:
-    name = path.name.lower()
-    if "det" in name:
-        return "det"
-    if "rec" in name:
-        return "rec"
-    if "cls" in name:
-        return "cls"
+    tokens = set(re.split(r"[^a-z0-9]+", path.stem.lower().replace("_", "-")))
+    for role in ("det", "rec", "cls"):
+        if role in tokens:
+            return role
     return None
 
 
-def _rapidocr_model_params(model_paths: dict[str, Path]) -> dict[str, str]:
-    params = {}
-    for role, path in model_paths.items():
-        params[f"{role}_model_path"] = str(path)
-    return params
+def _model_candidates_by_role(root: Path) -> dict[str, list[Path]]:
+    candidates: dict[str, list[Path]] = {}
+    for path in sorted(item for item in root.rglob("*") if _is_model_file(item)):
+        role = _model_role(path)
+        if role:
+            candidates.setdefault(role, []).append(path)
+    return candidates
+
+
+def _rapidocr_constructor_params(
+    model_paths: dict[str, Path], config: Mapping[str, Any]
+) -> dict[str, dict[str, Any]]:
+    params: dict[str, Any] = dict(config)
+    params["Det.model_path"] = str(model_paths["det"])
+    params["Rec.model_path"] = str(model_paths["rec"])
+    if "cls" in model_paths:
+        params["Cls.model_path"] = str(model_paths["cls"])
+    else:
+        params["use_cls"] = False
+    return {"params": params}
 
 
 def _serialize_config(value):
