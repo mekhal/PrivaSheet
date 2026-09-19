@@ -141,17 +141,9 @@ missing. It is not built yet.
 
 ### From source (today)
 
-**Before you start**
-
-| | |
-|---|---|
-| Python 3.12+ | `python --version`. On Windows, if that opens the Microsoft Store, install from [python.org](https://www.python.org/downloads/) and tick **Add python.exe to PATH**. |
-| Git | `git --version` |
-| A folder that is **not** synchronized | PrivaSheet keeps its database, uploads and page images next to the code. It refuses to start inside OneDrive or on a network share. Your home folder works: `C:\Users\<you>\PrivaSheet` on Windows, `~/PrivaSheet` elsewhere. Do not use OneDrive, Dropbox, Google Drive or iCloud, and note that Windows may have redirected Documents and Desktop into OneDrive. |
+Python 3.12 or newer and Git are required.
 
 **1. Get the code**
-
-In Command Prompt, go to the folder you chose first (`cd %USERPROFILE%` puts you in your home folder), then:
 
 ```
 git clone https://github.com/mekhal/PrivaSheet.git
@@ -204,7 +196,15 @@ Install [Ollama](https://ollama.com/) if you do not have it, start it, and pull 
 ollama pull qwen2.5:7b
 ```
 
-Then create a file named `.env` in the PrivaSheet folder (`notepad .env` on Windows, `nano .env` elsewhere) with:
+The repository ships an `.env.example`. Copy it to `.env` and edit it:
+
+```
+copy .env.example .env
+```
+
+On Linux and macOS use `cp .env.example .env`. The file must stay in the PrivaSheet project folder, next to
+`pyproject.toml`, and that is also the folder you start the application from — the settings are read from `.env` in
+the current directory.
 
 ```
 PRIVASHEET_BASE_URL=http://127.0.0.1:11434
@@ -229,13 +229,17 @@ Open `http://127.0.0.1:8765`. Stop it with `Ctrl+C`.
 Starting uvicorn against `privasheet.web.app:create_app` runs the UI without that worker — every page renders, but no
 document is ever processed. Use it for UI work only.
 
-To run the tests, install the development extras as well: `pip install -e ".[dev]"`, then `pytest -q`.
+**For tests only.** The development extras add pytest, ruff and httpx; they are not needed to use PrivaSheet:
+
+```
+pip install -e ".[dev]"
+pytest -q
+```
 
 ### If it will not start
 
 | Message | What to do |
 |---|---|
-| `privasheet: cannot start: data directory must not be inside OneDrive` | The folder is synchronized. Move PrivaSheet out of OneDrive, or set `PRIVASHEET_DATA_DIR` in `.env` to a local path, written out in full: `C:\Users\<you>\PrivaSheetData`. `.env` is read literally, so `%USERPROFILE%` and `~` do not work there. |
 | `privasheet: cannot start: data directory is already locked` | PrivaSheet is already running on this data directory. Close the other window, or wait a moment if you just stopped it. |
 | `privasheet: cannot start: data directory must not be a network share` | Use a local disk; a mapped drive or UNC path will not do. |
 | `No module named privasheet` | You are on the default branch, which does not carry the application yet. Run `git checkout develop`, then repeat step 2. |
