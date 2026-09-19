@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 from privasheet.ocr.engine import OcrError, RawBox
@@ -47,6 +48,16 @@ class RaisingOcrEngine(FakeOcrEngine):
         raise OcrError("OCR_FAILED", "synthetic failure")
 
 
+class ValueErrorOcrEngine(FakeOcrEngine):
+    def recognize(self, image) -> list[RawBox]:
+        raise ValueError("synthetic value error")
+
+
+class CrashingOcrEngine(FakeOcrEngine):
+    def recognize(self, image) -> list[RawBox]:
+        os._exit(1)
+
+
 def make_engine() -> FakeOcrEngine:
     return FakeOcrEngine()
 
@@ -57,3 +68,11 @@ def make_sleeping_engine() -> SleepingOcrEngine:
 
 def make_raising_engine() -> RaisingOcrEngine:
     return RaisingOcrEngine()
+
+
+def make_value_error_engine() -> ValueErrorOcrEngine:
+    return ValueErrorOcrEngine()
+
+
+def make_crashing_engine() -> CrashingOcrEngine:
+    return CrashingOcrEngine()

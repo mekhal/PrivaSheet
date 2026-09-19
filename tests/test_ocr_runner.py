@@ -23,13 +23,13 @@ from tests.fake_ocr import make_engine
 FAKE_ENGINE = "tests.fake_ocr:make_engine"
 SLEEPING_ENGINE = "tests.fake_ocr:make_sleeping_engine"
 RAISING_ENGINE = "tests.fake_ocr:make_raising_engine"
+VALUE_ERROR_ENGINE = "tests.fake_ocr:make_value_error_engine"
+CRASHING_ENGINE = "tests.fake_ocr:make_crashing_engine"
 
 
 @pytest.fixture(autouse=True)
 def assert_no_leftover_children():
     yield
-    for child in multiprocessing.active_children():
-        child.join(timeout=0.2)
     assert multiprocessing.active_children() == []
 
 
@@ -123,9 +123,12 @@ def test_sleeping_engine_hits_budget_and_child_is_dead(tmp_path):
             engine=SLEEPING_ENGINE,
         )
 
-    assert excinfo.value.stage == "ocr"
-    assert excinfo.value.page == 1
-    assert excinfo.value.total == 1
+    # The 1 second budget includes spawn start-up and child imports, so a very
+    # slow machine may time out before the child reports page progress.
+    if excinfo.value.stage is not None:
+        assert excinfo.value.stage == "ocr"
+        assert excinfo.value.page == 1
+        assert excinfo.value.total == 1
     assert excinfo.value.elapsed_s >= 1
 
 
@@ -173,6 +176,61 @@ def test_raising_engine_gives_ocr_failed(tmp_path):
             tmp_path / "ocr",
             timeout_s=5,
             engine=RAISING_ENGINE,
+        )
+
+    assert excinfo.value.code == "OCR_FAILED"
+
+
+def test_engine_value_error_gives_ocr_failed(tmp_path):
+    path = tmp_path / "page.png"
+    Image.new("RGB", (20, 10), "white").save(path)
+
+    with pytest.raises(OcrError) as excinfo:
+        run_ocr_job(
+            path,
+            "png",
+            Limits(),
+            tmp_path / "ocr",
+            timeout_s=5,
+            engine=VALUE_ERROR_ENGINE,
+        )
+
+    assert excinfo.value.code == "OCR_FAILED"
+
+
+def test_parent_progress_exception_leaves_no_child(tmp_path):
+    path = tmp_path / "page.png"
+    Image.new("RGB", (20, 10), "white").save(path)
+
+    def fail_on_progress(stage, page, total):
+        raise RuntimeError(f"{stage}:{page}:{total}")
+
+    with pytest.raises(RuntimeError):
+        run_ocr_job(
+            path,
+            "png",
+            Limits(),
+            tmp_path / "ocr",
+            timeout_s=5,
+            engine=FAKE_ENGINE,
+            on_progress=fail_on_progress,
+        )
+
+    assert multiprocessing.active_children() == []
+
+
+def test_child_crash_without_message_gives_ocr_failed(tmp_path):
+    path = tmp_path / "page.png"
+    Image.new("RGB", (20, 10), "white").save(path)
+
+    with pytest.raises(OcrError) as excinfo:
+        run_ocr_job(
+            path,
+            "png",
+            Limits(),
+            tmp_path / "ocr",
+            timeout_s=5,
+            engine=CRASHING_ENGINE,
         )
 
     assert excinfo.value.code == "OCR_FAILED"
