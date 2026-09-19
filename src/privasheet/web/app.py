@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import mimetypes
 from base64 import b64encode
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -362,10 +363,31 @@ def _with_security_headers(response):
     return response
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, runtime=None) -> FastAPI:
     settings = settings or load_settings()
-    app = FastAPI(title="PrivaSheet", docs_url=None, redoc_url=None)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.startup_error = None
+        try:
+            runtime.start()
+        except Exception as exc:
+            app.state.startup_error = exc
+            raise
+        try:
+            yield
+        finally:
+            runtime.stop()
+
+    app = FastAPI(
+        title="PrivaSheet",
+        docs_url=None,
+        redoc_url=None,
+        lifespan=lifespan if runtime is not None else None,
+    )
     app.state.settings = settings
+    app.state.runtime = runtime
+    app.state.startup_error = None
 
     web_dir = Path(__file__).resolve().parent
     templates = Jinja2Templates(directory=web_dir / "templates")
@@ -415,6 +437,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ]
             }
         )
+
+    @app.get("/api/pipeline/status")
+    async def pipeline_status_api() -> JSONResponse:
+        if runtime is None:
+            return JSONResponse({"worker": "not_configured"}, status_code=503)
+        return JSONResponse(runtime.status())
 
     @app.post("/api/templates/validate")
     async def validate_template_api(request: Request) -> JSONResponse:
