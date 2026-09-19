@@ -17,6 +17,9 @@ def normalize_boxes(
 ) -> list[dict]:
     """Normalize raw pixel boxes into the snapshot box shape."""
 
+    if width <= 0 or height <= 0:
+        raise OcrError("OCR_FAILED", "OCR page dimensions must be positive.")
+
     boxes = []
     for raw_box in raw_boxes:
         text = raw_box.text.strip()
