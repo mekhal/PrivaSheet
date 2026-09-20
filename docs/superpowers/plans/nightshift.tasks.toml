@@ -1127,8 +1127,10 @@ src/privasheet/selfcheck.py
   6. llm server — the configured base_url, then one real call through llm.LlmClient with a trivial prompt and a
      short timeout. LlmUnavailable is an error whose detail says the server did not answer; LlmConfigError is an
      error naming the rule that was broken.
-  7. llm model — carried by the same call: report the model that answered, or that the configured model is not
-     available on that server.
+  7. llm model — carried by the same call: report the configured model, which is the model that answered when
+     the call succeeded. A server that does not have it answers with an error naming the model; that is an error
+     row saying the model is not available on that server. LlmClient keeps the model name private and llm.py is
+     not yours to change, so read the name from settings, not from the response.
   8. web port — whether settings.host:port can be bound right now, or is already taken.
 - Each error detail says what to do in one short sentence, in the same words as the README troubleshooting table.
 - No check may raise: an unexpected exception becomes an error row naming the exception class.
