@@ -178,16 +178,6 @@ pip install -e .
 Once the environment is active the prompt starts with `(.venv)`. Every command below assumes that. A new terminal
 starts without it, so `cd` to the folder and activate again.
 
-Then add the OCR engine, in the same terminal:
-
-```
-pip install rapidocr onnxruntime
-```
-
-It is a separate line because it is not in the project dependencies yet. The OCR models ship inside the `rapidocr`
-package, so this is the only download: PrivaSheet never fetches a model while it runs. Without it, every document
-fails with `Missing OCR package rapidocr`.
-
 **3. Point it at your local LLM**
 
 Install [Ollama](https://ollama.com/) if you do not have it, start it, and pull a model once:
