@@ -219,6 +219,22 @@ Open `http://127.0.0.1:8765`. Stop it with `Ctrl+C`.
 Starting uvicorn against `privasheet.web.app:create_app` runs the UI without that worker — every page renders, but no
 document is ever processed. Use it for UI work only.
 
+To see what is ready and what is not, run `python -m privasheet --check`. It prints one table and exits with 0 when
+nothing is in error, 1 otherwise; every error row says what to do. It starts neither the web server nor the worker and
+processes no document, and it can be run while PrivaSheet is running.
+
+```
+check           status  detail
+python          ok      3.12.3 (requires >=3.12)
+data directory  ok      C:\PrivaSheet\temp is writable
+database        ok      schema version 2
+ocr engine      ok      rapidocr 3.9.2, onnxruntime 1.30.0
+ocr models      ok      PP-OCRv6_det_small.onnx, PP-OCRv6_rec_small.onnx
+llm server      ok      http://127.0.0.1:11434 answered
+llm model       ok      qwen2.5:7b answered
+web port        ok      127.0.0.1:8765 is free
+```
+
 **For tests only.** The development extras add pytest, ruff and httpx; they are not needed to use PrivaSheet:
 
 ```
